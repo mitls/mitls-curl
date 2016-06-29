@@ -598,6 +598,7 @@ X_OBJS= \
 	$(DIROBJ)\pipeline.obj \
 	$(DIROBJ)\polarssl.obj \
 	$(DIROBJ)\polarssl_threadlock.obj \
+	$(DIROBJ)\mitls.obj \
 	$(DIROBJ)\pop3.obj \
 	$(DIROBJ)\progress.obj \
 	$(DIROBJ)\rawstr.obj \

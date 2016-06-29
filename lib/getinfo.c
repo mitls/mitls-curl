@@ -335,6 +335,8 @@ static CURLcode getinfo_slist(struct SessionHandle *data, CURLINFO info,
             tsi->internals = (void *)&conn->ssl[i].ssl;
 #elif defined(USE_SCHANNEL)
             tsi->internals = (void *)&conn->ssl[i].ctxt->ctxt_handle;
+#elif defined(USE_MITLS)
+            tsi->internals = (void *)conn->ssl[i].mitls_ctx;
 #elif defined(USE_SSL)
 #error "SSL backend specific information missing for CURLINFO_TLS_SSL_PTR"
 #endif

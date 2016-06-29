@@ -149,7 +149,7 @@ AC_SUBST(PKGADD_VENDOR)
 
 dnl
 dnl initialize all the info variables
-    curl_ssl_msg="no      (--with-{ssl,gnutls,nss,polarssl,mbedtls,cyassl,axtls,winssl,darwinssl} )"
+    curl_ssl_msg="no      (--with-{ssl,gnutls,nss,polarssl,mbedtls,cyassl,axtls,winssl,darwinssl,mitls} )"
     curl_ssh_msg="no      (--with-libssh2)"
    curl_zlib_msg="no      (--with-zlib)"
     curl_gss_msg="no      (--with-gssapi)"
@@ -1973,6 +1973,95 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
 fi
 
 dnl ----------------------------------------------------
+dnl check for miTLS
+dnl ----------------------------------------------------
+
+dnl Default to compiler & linker defaults for miTLS files & libraries.
+OPT_MITLS=no
+
+_cppflags=$CPPFLAGS
+_ldflags=$LDFLAGS
+AC_ARG_WITH(mitls,dnl
+AC_HELP_STRING([--with-mitls=PATH],[where to look for miTLS, PATH points to the installation root])
+AC_HELP_STRING([--without-mitls], [disable miTLS detection]),
+  OPT_MITLS=$withval)
+
+if test "$curl_ssl_msg" = "$init_ssl_msg"; then
+
+  if test X"$OPT_MITLS" != Xno; then
+
+    if test "$OPT_MITLS" = "yes"; then
+      OPT_MITLS=""
+    fi
+
+    if test -z "$OPT_MITLS" ; then
+      dnl check for lib first without setting any new path
+
+      AC_CHECK_LIB(mitls, FFI_mitls_init,
+      dnl libmitls found, set the variable
+       [
+         AC_DEFINE(USE_MITLS, 1, [if miTLS is enabled])
+         AC_SUBST(USE_MITLS, [1])
+         MITLS_ENABLED=1
+         USE_MITLS="yes"
+         curl_ssl_msg="enabled (miTLS)"
+        ])
+    fi
+
+    addld=""
+    addlib=""
+    addcflags=""
+    polarssllib=""
+
+    if test "x$USE_MITLS" != "xyes"; then
+      dnl add the path and test again
+      addld=-L$OPT_MITLS/$libsuff
+      addcflags=-I$OPT_MITLS
+      mitlslib=$OPT_MITLS/$libsuff
+
+      LDFLAGS="$LDFLAGS $addld"
+      if test "$addcflags" != "-I/usr/include"; then
+         CPPFLAGS="$CPPFLAGS $addcflags"
+      fi
+
+      AC_CHECK_LIB(mitls, FFI_mitls_init,
+       [
+       AC_DEFINE(USE_MITLS, 1, [if miTLS is enabled])
+       AC_SUBST(USE_MITLS, [1])
+       MITLS_ENABLED=1
+       USE_MITLS="yes"
+       curl_ssl_msg="enabled (miTLS)"
+       ],
+       [
+         CPPFLAGS=$_cppflags
+         LDFLAGS=$_ldflags
+       ])
+    fi
+
+    if test "x$USE_MITLS" = "xyes"; then
+      AC_MSG_NOTICE([detected miTLS])
+
+      LIBS="-lmitls $LIBS"
+      
+      if test -n "$mitlslib"; then
+        dnl when shared libs were found in a path that the run-time
+        dnl linker doesn't search through, we need to add it to
+        dnl LD_LIBRARY_PATH to prevent further configure tests to fail
+        dnl due to this
+        if test "x$cross_compiling" != "xyes"; then
+          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$misltlib"
+          export LD_LIBRARY_PATH
+          AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH])
+        fi
+      fi
+    fi
+
+  fi dnl miTLS not disabled
+
+fi
+
+
+dnl ----------------------------------------------------
 dnl check for mbedTLS
 dnl ----------------------------------------------------
 
@@ -2396,9 +2485,9 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
   fi
 fi
 
-if test "x$OPENSSL_ENABLED$GNUTLS_ENABLED$NSS_ENABLED$POLARSSL_ENABLED$MBEDTLS_ENABLED$AXTLS_ENABLED$CYASSL_ENABLED$WINSSL_ENABLED$DARWINSSL_ENABLED" = "x"; then
+if test "x$OPENSSL_ENABLED$GNUTLS_ENABLED$NSS_ENABLED$POLARSSL_ENABLED$MBEDTLS_ENABLED$AXTLS_ENABLED$CYASSL_ENABLED$WINSSL_ENABLED$DARWINSSL_ENABLED$MITLS_ENABLED" = "x"; then
   AC_MSG_WARN([SSL disabled, you will not be able to use HTTPS, FTPS, NTLM and more.])
-  AC_MSG_WARN([Use --with-ssl, --with-gnutls, --with-polarssl, --with-cyassl, --with-nss, --with-axtls, --with-winssl, or --with-darwinssl to address this.])
+  AC_MSG_WARN([Use --with-ssl, --with-gnutls, --with-polarssl, --with-cyassl, --with-nss, --with-axtls, --with-winssl, --with-mitls, or --with-darwinssl to address this.])
 else
   # SSL is enabled, genericly
   AC_SUBST(SSL_ENABLED)
@@ -2718,6 +2807,8 @@ AC_HELP_STRING([--disable-versioned-symbols], [Disable versioned symbols in shar
           versioned_symbols_flavour="WINSSL_"
         elif test "x$DARWINSSL_ENABLED" = "x1"; then
           versioned_symbols_flavour="DARWINSSL_"
+        elif test "x$MITLS_ENABLED" = "x1"; then
+          versioned_symbols_flavour="MITLS_"
         else
           versioned_symbols_flavour=""
         fi
