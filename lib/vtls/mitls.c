@@ -58,24 +58,24 @@
 //   by libcurl and so the TLS provider can use it to store state any way it chooses.  For miTLS:
 //
 //  0:  ssl_connect_1           - initial state.  Initializes and configures miTLS, then sets mitls_connect_state to mitls_ClientHello
-//  1:  ssl_connect_2           - working through the mitls_connect_state list
+//  1:  ssl_connect_2           - TLS 1.2 implementation
 //  2:  ssl_connect_2_reading   - unused
 //  3:  ssl_connect_2_writing   - unused
-//  4:  ssl_connect_3           - unused
+//  4:  ssl_connect_3           - TLS 1.3 implementation
 //  5:  ssl_connect_done        - set when the entire connection state machine has finished successfully
 
 typedef enum {
     mitls_ClientHello,          // Send ClientHello
     mitls_ServerHello,          // Receive and process ServerHello
-    mitls_EncryptedExtensions,  // Receive and process EncryptedExtensions (TLS 1.3 only)
     mitls_CertificateVerify,    // Receive and process CertificateVerify
-    mitls_ServerKeyExchange,    // Recieve and process ServerKeyExchange (TLS 1.2 only)
-    mitls_ServerHelloDone,      // Recieve and process ServerHelloDone (TLS 1.2 only)
-    mitls_PrepareClientKeyExchange, // Send ClientKeyExchange (TLS 1.2 only)
-    mitls_PrepareChangeCipherSpec, // Send Change_cipher_spec (TLS 1.2 only)
-    mitls_PrepareHandshake,     // Send Handshake (TLS 1.2 only)
-    mitls_RecieveChangeCipherSpec, // Receive Change Cipher Spec (CCC) (TLS 1.2 only)
-    mitls_RecieveServerFinished, // Receive and process Finished (TLS 1.2 only)
+    mitls_ServerKeyExchange,    // Recieve and process ServerKeyExchange
+    mitls_ServerHelloDone,      // Recieve and process ServerHelloDone
+    mitls_PrepareClientKeyExchange, // Send ClientKeyExchange
+    mitls_PrepareChangeCipherSpec, // Send Change_cipher_spec
+    mitls_PrepareHandshake,     // Send Handshake
+    mitls_RecieveChangeCipherSpec, // Receive Change Cipher Spec (CCC)
+    mitls_RecieveServerFinished, // Receive and process Finished
+    mitls_ClientFinished,        // Send Client Finished (TLS 1.3 only)
     mitls_CompletedState,        // Completed all steps
     mitls_ErrorState
 } mitls_connect_state;
@@ -88,14 +88,25 @@ typedef enum {
 const char *mitls_TLS_V12 = "1.2";
 const char *mitls_TLS_V13 = "1.3";
 
+typedef struct {
+    struct _FFI_mitls_callbacks cb;
+    struct connectdata *conn;
+    int sockindex;
+} mitls_callback_context;
+
 // This is miTLS-specific state, stored inside the ssl_connect_data
 typedef struct {
     mitls_connect_state state;
     const char *tls_version;
     size_t mitls_config;        // gc handle to a mitls TLSInfo.config object
+    
+    // TLS 1.2 fields
     ssize_t record_length;      // actual # of bytes in record[]
     char header[5];             // 5-byte header for TLS records
     char record[65536];         // the remainder of the TLS record (max of max_TLSCiphertext_fragment_length during TLS negotiation, but longer for recv() later
+    
+    // TLS 1.3 fields
+    mitls_callback_context callback;
 } mitls_connect_context;
 
 CURLcode Curl_mitls_connect_common(struct connectdata *conn, int sockindex, bool blocking, bool *done);
@@ -111,13 +122,14 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
                         CURLcode *curlcode);
 CURLcode Curl_mitls_connect_step1(struct connectdata *conn, int sockindex);
 CURLcode Curl_mitls_RecvRecord(struct SessionHandle *data, mitls_connect_context *connmitls, curl_socket_t sockfd, bool blocking);
-CURLcode Curl_mitls_connect_step2(struct connectdata *conn, int sockindex, bool blocking);
+CURLcode Curl_mitls_connect_step_12(struct connectdata *conn, int sockindex, bool blocking);
+CURLcode Curl_mitls_connect_step_13(struct connectdata *conn, int sockindex, bool blocking);
 
 typedef int (*FFI_mitls_recieve_step_function)(/* in out */ size_t *state, char* header, size_t header_size, char *record, size_t record_size);
-CURLcode Curl_mitls_execute_recieve_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_recieve_step_function, mitls_connect_state next12, mitls_connect_state next13);
+CURLcode Curl_mitls_execute_recieve_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_recieve_step_function, mitls_connect_state next);
 
 typedef void* (*FFI_mitls_prepare_step_function)(/* in out */ size_t *config, /* out */ size_t *packet_size);
-CURLcode Curl_mitls_execute_send_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_prepare_step_function, mitls_connect_state next12, mitls_connect_state next13);
+CURLcode Curl_mitls_execute_send_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_prepare_step_function, mitls_connect_state next);
 
 // Called by CURL
 int  Curl_mitls_init(void)
@@ -148,7 +160,11 @@ ssize_t Curl_mitls_send(struct connectdata *conn,
     size_t packet_size;
     ssize_t SendResult;
       
-    packet = FFI_mitls_prepare_send(&connmitls->mitls_config, mem, len, &packet_size); 
+    if (connmitls->tls_version == mitls_TLS_V12) {
+        packet = FFI_mitls_prepare_send(&connmitls->mitls_config, mem, len, &packet_size); 
+    } else {
+        packet = FFI_mitls_prepare_send13(&connmitls->mitls_config, mem, len, &packet_size); 
+    }
     if (packet == NULL) {
         failf(data, "Failed FFI_mitls_prepare_send\n");
         *curlcode = CURLE_SEND_ERROR;
@@ -188,10 +204,17 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
         void *packet;
         size_t packet_size;
         
-        packet = FFI_mitls_handle_receive(&connmitls->mitls_config,
-                   connmitls->header, sizeof(connmitls->header), 
-                   connmitls->record, connmitls->record_length,
-                   &packet_size);
+        if (connmitls->tls_version == mitls_TLS_V12) {
+            packet = FFI_mitls_handle_receive(&connmitls->mitls_config,
+                       connmitls->header, sizeof(connmitls->header), 
+                       connmitls->record, connmitls->record_length,
+                       &packet_size);
+        } else {
+            packet = FFI_mitls_handle_receive13(&connmitls->mitls_config,
+                       connmitls->header, sizeof(connmitls->header), 
+                       connmitls->record, connmitls->record_length,
+                       &packet_size);
+        }
         if (packet == NULL) {
             *curlcode = CURLE_RECV_ERROR;
             failf(data, "Leaving %s -1 after failed FFI\n", __FUNCTION__);
@@ -297,7 +320,7 @@ CURLcode Curl_mitls_connect_step1(struct connectdata *conn, int sockindex)
     // Create a miTLS-side config object representing the TLS connection settings
     FFI_mitls_config(&connmitls->mitls_config, connmitls->tls_version, conn->host.name);
     
-    connssl->connecting_state = ssl_connect_2;
+    connssl->connecting_state = (connmitls->tls_version == mitls_TLS_V13) ? ssl_connect_3 : ssl_connect_2;
     return CURLE_OK;    
 }
 
@@ -349,7 +372,7 @@ CURLcode Curl_mitls_RecvRecord(struct SessionHandle *data, mitls_connect_context
     return CURLE_OK;
 }
 
-CURLcode Curl_mitls_execute_recieve_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_recieve_step_function fn, mitls_connect_state next12, mitls_connect_state next13)
+CURLcode Curl_mitls_execute_recieve_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_recieve_step_function fn, mitls_connect_state next)
 {
     struct SessionHandle *data = conn->data;
     mitls_connect_context *connmitls = (mitls_connect_context*)conn->ssl[sockindex].mitls_ctx;
@@ -373,12 +396,12 @@ CURLcode Curl_mitls_execute_recieve_step(struct connectdata *conn, int sockindex
         return CURLE_SSL_CONNECT_ERROR;
     }
     
-    connmitls->state = (connmitls->tls_version == mitls_TLS_V13) ? next13 : next12;
+    connmitls->state = next;
     return CURLE_OK;
     
 }
 
-CURLcode Curl_mitls_execute_send_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_prepare_step_function fn, mitls_connect_state next12, mitls_connect_state next13)
+CURLcode Curl_mitls_execute_send_step(struct connectdata *conn, int sockindex, bool blocking, FFI_mitls_prepare_step_function fn, mitls_connect_state next)
 {
     mitls_connect_context *connmitls = (mitls_connect_context*)conn->ssl[sockindex].mitls_ctx;
     ssize_t SendResult;
@@ -401,41 +424,37 @@ CURLcode Curl_mitls_execute_send_step(struct connectdata *conn, int sockindex, b
         return CURLE_SEND_ERROR;
     }
     
-    connmitls->state = (connmitls->tls_version == mitls_TLS_V13) ? next13 : next12;
+    connmitls->state = next;
     return CURLE_OK;
 }
 
-CURLcode Curl_mitls_connect_step2(struct connectdata *conn, int sockindex, bool blocking)
+// Core of TLS 1.2
+CURLcode Curl_mitls_connect_step_12(struct connectdata *conn, int sockindex, bool blocking)
 {
     struct SessionHandle *data = conn->data;
     mitls_connect_context *connmitls = (mitls_connect_context*)conn->ssl[sockindex].mitls_ctx;
     
     switch (connmitls->state) {
     case mitls_ClientHello:
-        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_client_hello, mitls_ServerHello, mitls_ServerHello);
+        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_client_hello, mitls_ServerHello);
     case mitls_ServerHello:
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_hello, mitls_CertificateVerify, mitls_EncryptedExtensions);
-    case mitls_EncryptedExtensions: // 1.3-only
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_encrypted_extensions, mitls_CertificateVerify, mitls_CertificateVerify);
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_hello, mitls_CertificateVerify);
     case mitls_CertificateVerify:
-    {
-        FFI_mitls_recieve_step_function fn = (connmitls->tls_version == mitls_TLS_V13) ? FFI_mitls_handle_certificate_verify13 : FFI_mitls_handle_certificate_verify12;
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, fn, mitls_ServerKeyExchange, mitls_ErrorState); // bugbug: finish TLS 1.3 support instead of ErrorState
-    }
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_certificate_verify12, mitls_ServerKeyExchange);
     case mitls_ServerKeyExchange:
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_key_exchange, mitls_ServerHelloDone, mitls_ErrorState);
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_key_exchange, mitls_ServerHelloDone);
     case mitls_ServerHelloDone:
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_hello_done, mitls_PrepareClientKeyExchange, mitls_ErrorState);
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_hello_done, mitls_PrepareClientKeyExchange);
    case mitls_PrepareClientKeyExchange:
-        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_client_key_exchange, mitls_PrepareChangeCipherSpec, mitls_ErrorState);
+        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_client_key_exchange, mitls_PrepareChangeCipherSpec);
    case mitls_PrepareChangeCipherSpec:
-        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_change_cipher_spec, mitls_PrepareHandshake, mitls_ErrorState);
+        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_change_cipher_spec, mitls_PrepareHandshake);
    case mitls_PrepareHandshake:
-        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_handshake, mitls_RecieveChangeCipherSpec, mitls_ErrorState);
+        return Curl_mitls_execute_send_step(conn, sockindex, blocking, FFI_mitls_prepare_handshake, mitls_RecieveChangeCipherSpec);
    case mitls_RecieveChangeCipherSpec:
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_change_cipher_spec, mitls_RecieveServerFinished, mitls_ErrorState);
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_change_cipher_spec, mitls_RecieveServerFinished);
    case mitls_RecieveServerFinished:
-        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_finished, mitls_CompletedState, mitls_ErrorState);
+        return Curl_mitls_execute_recieve_step(conn, sockindex, blocking, FFI_mitls_handle_server_finished, mitls_CompletedState);
    case mitls_CompletedState:
    {
         struct ssl_connect_data *connssl = &conn->ssl[sockindex];
@@ -451,6 +470,94 @@ CURLcode Curl_mitls_connect_step2(struct connectdata *conn, int sockindex, bool 
     return CURLE_FAILED_INIT;
 }
 
+// This is called by miTLS within FFI_mitls_connect13()
+int Curl_mitls_send_callback13(struct _FFI_mitls_callbacks *callbacks, const void *buffer, size_t buffer_size)
+{
+    mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
+    ssize_t SendResult;
+    
+    SendResult = send(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
+    if (SendResult != buffer_size) {
+        struct SessionHandle *data = ctx->conn->data;
+        int e = errno;
+        if (e == EAGAIN || e == EWOULDBLOCK) {
+            infof(data, "Curl_mitls_send_callback13():  EAGAIN or EWOULDBLOCK\n");
+        } else {
+            char msg[128];
+            strerror_r(e, msg, sizeof(msg));
+            infof(data, "Curl_mitls_send_callback13():  Unknown errno %d - %s\n", e, msg);
+        }
+    }
+    
+    return (int)SendResult;
+}
+
+// This is called by miTLS within FFI_mitls_connect13()
+int Curl_mitls_recv_callback13(struct _FFI_mitls_callbacks *callbacks, void *buffer, size_t buffer_size)
+{
+    mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
+    struct SessionHandle *data = ctx->conn->data;
+    ssize_t RecvResult;
+    
+    if (Curl_timeleft(data, NULL, TRUE) < 0) {
+        // no need to continue if time already is up
+        failf(data, "SSL connection timeout");
+        return CURLE_OPERATION_TIMEDOUT;
+    }
+    
+    RecvResult = recv(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
+    if (RecvResult != buffer_size) {
+        int e = errno;
+        if (e == EAGAIN || e == EWOULDBLOCK) {
+            infof(data, "Curl_mitls_recv_callback13():  EAGAIN or EWOULDBLOCK\n");
+        } else {
+            char msg[128];
+            strerror_r(e, msg, sizeof(msg));
+            infof(data, "Curl_mitls_recv_callback13():  Unknown errno %d - %s\n", e, msg);
+        }
+    }
+    
+    return (int)RecvResult;
+}
+
+
+// Core of TLS 1.3
+CURLcode Curl_mitls_connect_step_13(struct connectdata *conn, int sockindex, bool blocking)
+{
+    struct SessionHandle *data = conn->data;
+    mitls_connect_context *connmitls = (mitls_connect_context*)conn->ssl[sockindex].mitls_ctx;
+    int ret;
+    curl_socket_t sockfd = conn->sock[sockindex];
+    CURLcode result = CURLE_FAILED_INIT;
+    
+    connmitls->callback.cb.send = Curl_mitls_send_callback13;
+    connmitls->callback.cb.recv = Curl_mitls_recv_callback13;
+    connmitls->callback.conn = conn;
+    connmitls->callback.sockindex = sockindex;
+    
+    if (!blocking) {
+        // Set the socket to blocking
+        curlx_nonblock(sockfd, FALSE);
+    }  
+    
+    ret = FFI_mitls_connect13(&connmitls->callback.cb, &connmitls->mitls_config);
+    if (ret == 0) {
+        failf(data, "FFI_mitls_connect13 failed");
+        result = CURLE_FAILED_INIT;
+    } else {
+        infof(data, "FFI_mitls_connect13 succeeded.  Connection complete.");
+        struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+        connssl->connecting_state = ssl_connect_done;
+        result = CURLE_OK;
+    }
+    
+    if (!blocking) {
+        // Set the socket back to nonblocking
+        curlx_nonblock(sockfd, TRUE);
+    }  
+    
+    return result;
+}
 
 CURLcode Curl_mitls_connect_common(struct connectdata *conn, int sockindex, bool blocking, bool *done)
 {
@@ -474,8 +581,11 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn, int sockindex, bool
     case ssl_connect_1:
         result = Curl_mitls_connect_step1(conn, sockindex);
         return result;
-    case ssl_connect_2:
-        result = Curl_mitls_connect_step2(conn, sockindex, blocking);
+    case ssl_connect_2: // for TLS 1.2
+        result = Curl_mitls_connect_step_12(conn, sockindex, blocking);
+        return result;
+    case ssl_connect_3: // for TLS 1.3
+        result = Curl_mitls_connect_step_13(conn, sockindex, blocking);
         return result;
     case ssl_connect_done:
         connssl->connecting_state = ssl_connect_1;
@@ -499,7 +609,7 @@ CURLcode Curl_mitls_connect(struct connectdata *conn, int sockindex)
     bool done = FALSE;
     CURLcode retval;
    
-    retval = Curl_mitls_connect_common(conn, sockindex, FALSE, &done);
+    retval = Curl_mitls_connect_common(conn, sockindex, TRUE, &done);
     return retval;
 }
 
@@ -510,7 +620,7 @@ CURLcode Curl_mitls_connect_nonblocking(struct connectdata *conn,
 {
     CURLcode retval;
     
-    retval = Curl_mitls_connect_common(conn, sockindex, TRUE, done);
+    retval = Curl_mitls_connect_common(conn, sockindex, FALSE, done);
     return retval;
 }
 
