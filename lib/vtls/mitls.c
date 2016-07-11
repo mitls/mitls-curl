@@ -80,7 +80,6 @@ typedef struct {
 
 // This is miTLS-specific state, stored inside the ssl_connect_data
 typedef struct {
-    const char *tls_version;
     mitls_state * mitls_config;
     
     ssize_t record_length;      // actual # of bytes in record[]
@@ -231,6 +230,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     char *errmsg = NULL;
     int result;
     CURLcode ret = CURLE_SSL_CONNECT_ERROR;
+    const char *tls_version = NULL;
     
     if (connssl->mitls_ctx) {
         free(connssl->mitls_ctx);
@@ -245,10 +245,10 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     switch(data->set.ssl.version) {
     case CURL_SSLVERSION_DEFAULT:
     case CURL_SSLVERSION_TLSv1_2:
-        connmitls->tls_version = mitls_TLS_V12;
+        tls_version = mitls_TLS_V12;
         break;
     case CURL_SSLVERSION_TLSv1_3:
-        connmitls->tls_version = mitls_TLS_V13;
+        tls_version = mitls_TLS_V13;
         break;
     default:
         failf(data, "Unsupported SSL protocol version");
@@ -303,7 +303,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     }    
     
     // Create a miTLS-side config object representing the TLS connection settings
-    result = FFI_mitls_configure(&connmitls->mitls_config, connmitls->tls_version, conn->host.name, &outmsg, &errmsg);
+    result = FFI_mitls_configure(&connmitls->mitls_config, tls_version, conn->host.name, &outmsg, &errmsg);
     Curl_mitls_process_messages(data, outmsg, errmsg);
     if (result != 0) {
         // Configuration succeeded. Begin connecting
