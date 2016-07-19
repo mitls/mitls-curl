@@ -141,32 +141,17 @@ ssize_t Curl_mitls_send(struct connectdata *conn,
     struct SessionHandle *data = conn->data;
     struct ssl_connect_data *connssl = &conn->ssl[sockindex];
     mitls_connect_context *connmitls = (mitls_connect_context*)connssl->mitls_ctx;
-    void *packet;
-    size_t packet_size;
-    ssize_t SendResult;
+    int result;
     char *outmsg = NULL;
     char *errmsg = NULL;
       
-    packet = FFI_mitls_prepare_send(connmitls->mitls_config, mem, len, &packet_size, &outmsg, &errmsg); 
+    result = FFI_mitls_send(connmitls->mitls_config, mem, len, &outmsg, &errmsg); 
     Curl_mitls_process_messages(data, outmsg, errmsg);
-    if (packet == NULL) {
+    if (result == 0) {
         failf(data, "Failed FFI_mitls_prepare_send\n");
         *curlcode = CURLE_SEND_ERROR;
         return (ssize_t)-1; 
     }
-    SendResult = send(conn->sock[sockindex], packet, packet_size, 0);
-    FFI_mitls_free_packet(packet);
-    if (SendResult != (ssize_t)packet_size) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            failf(data, "send() failed with EAGAIN or WOULDBLOCK.  Try again\n");
-            *curlcode = CURLE_AGAIN;
-            return 0;
-        }
-        failf(data, "send() failed with errno=%d\n", errno);
-        *curlcode = CURLE_SEND_ERROR;
-        return -1;
-    }
-  
     *curlcode = CURLE_OK;
     return (ssize_t)len;
 }
@@ -181,39 +166,28 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
     struct SessionHandle *data = conn->data;
     struct ssl_connect_data *connssl = &conn->ssl[sockindex];
     mitls_connect_context *connmitls = (mitls_connect_context*)connssl->mitls_ctx;
-    CURLcode code;
     char *outmsg = NULL;
     char *errmsg = NULL;
+    size_t packet_size = 0;
+    void *packet;
     
-    code = Curl_mitls_RecvRecord(data, connmitls, conn->sock[sockindex], FALSE);
-    if (code == CURLE_OK) {
-        void *packet;
-        size_t packet_size;
-        
-        packet = FFI_mitls_handle_receive(connmitls->mitls_config,
-                   connmitls->header, sizeof(connmitls->header), 
-                   connmitls->record, connmitls->record_length,
-                   &packet_size,
-                   &outmsg, &errmsg);
-        Curl_mitls_process_messages(data, outmsg, errmsg);
-        if (packet == NULL) {
-            *curlcode = CURLE_RECV_ERROR;
-            failf(data, "Leaving %s -1 after failed FFI\n", __FUNCTION__);
-            return -1;
-        }
-        infof(data, "Curl_mitls_recv got %d bytes.  Caller asked for %d bytes.\n", (int)packet_size, (int)buffersize);
-        if (packet_size > buffersize) {
-            packet_size = buffersize;
-        }
-        memcpy(buf, packet, packet_size);
-        FFI_mitls_free_packet(packet);
-        *curlcode = CURLE_OK;
-        return packet_size;
-    } else {
-        *curlcode = code;
-        failf(data, "Leaving %s -1 code=%d\n", __FUNCTION__, code);
+    packet = FFI_mitls_receive(connmitls->mitls_config,
+               &packet_size,
+               &outmsg, &errmsg);
+    Curl_mitls_process_messages(data, outmsg, errmsg);
+    if (packet == NULL) {
+        *curlcode = CURLE_RECV_ERROR;
+        failf(data, "Leaving %s -1 after failed FFI\n", __FUNCTION__);
         return -1;
     }
+    infof(data, "Curl_mitls_recv got %d bytes.  Caller asked for %d bytes.\n", (int)packet_size, (int)buffersize);
+    if (packet_size > buffersize) {
+        packet_size = buffersize;
+    }
+    memcpy(buf, packet, packet_size);
+    FFI_mitls_free_packet(packet);
+    *curlcode = CURLE_OK;
+    return packet_size;
 }
 
 
