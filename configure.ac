@@ -2015,9 +2015,9 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
 
     if test "x$USE_MITLS" != "xyes"; then
       dnl add the path and test again
-      addld=-L$OPT_MITLS/$libsuff
-      addcflags=-I$OPT_MITLS
-      mitlslib=$OPT_MITLS/$libsuff
+      addld=-L$OPT_MITLS/src/tls/$libsuff
+      addcflags=-I$OPT_MITLS/libs/ffi
+      mitlslib=$OPT_MITLS/src/tls/$libsuff
 
       LDFLAGS="$LDFLAGS $addld"
       if test "$addcflags" != "-I/usr/include"; then
