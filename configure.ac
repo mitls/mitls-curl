@@ -2049,9 +2049,11 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
         dnl LD_LIBRARY_PATH to prevent further configure tests to fail
         dnl due to this
         if test "x$cross_compiling" != "xyes"; then
-          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$misltlib"
+          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$mitlslib"
+          DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib"
           export LD_LIBRARY_PATH
-          AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH])
+          export DYLD_LIBRARY_PATH
+          AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH and DYLD_LIBRARY_PATH])
         fi
       fi
     fi
