@@ -171,6 +171,7 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
     size_t packet_size = 0;
     void *packet;
     
+retry:    
     packet = FFI_mitls_receive(connmitls->mitls_config,
                &packet_size,
                &outmsg, &errmsg);
@@ -181,6 +182,9 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
         return -1;
     }
     infof(data, "Curl_mitls_recv got %d bytes.  Caller asked for %d bytes.\n", (int)packet_size, (int)buffersize);
+    if (packet_size == 0) {
+        goto retry;
+    }
     if (packet_size > buffersize) {
         packet_size = buffersize;
     }
@@ -341,12 +345,15 @@ int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks, const void 
     mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
     ssize_t SendResult;
     
+retry:    
     SendResult = send(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
     if (SendResult != buffer_size) {
         struct SessionHandle *data = ctx->conn->data;
         int e = errno;
         if (e == EAGAIN || e == EWOULDBLOCK) {
-            infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK\n");
+            infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK.  Trying again\n");
+             Curl_wait_ms(5);
+            goto retry;
         } else {
             char msg[128];
             strerror_r(e, msg, sizeof(msg));
@@ -367,14 +374,19 @@ int Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks, void *buffe
     if (Curl_timeleft(data, NULL, TRUE) < 0) {
         // no need to continue if time already is up
         failf(data, "SSL connection timeout");
-        return CURLE_OPERATION_TIMEDOUT;
+        return -1;
     }
     
+    // BUGBUG: Set the socket to blocking.  MITLS doesn't support non-blocking recv().
+    curlx_nonblock(ctx->conn->sock[ctx->sockindex], FALSE);
+retry:    
     RecvResult = recv(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
     if (RecvResult != buffer_size) {
         int e = errno;
         if (e == EAGAIN || e == EWOULDBLOCK) {
             infof(data, "Curl_mitls_recv_callback():  EAGAIN or EWOULDBLOCK\n");
+            Curl_wait_ms(5);
+            goto retry;
         } else {
             char msg[128];
             strerror_r(e, msg, sizeof(msg));
@@ -432,6 +444,10 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn, int sockindex, bool
     CURLcode result;
     struct SessionHandle *data = conn->data;
     struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+
+    // Uncomment this line in order to enable infof() to log to stderr in host apps
+    // that don't support verbose logging, such as git.
+    //data->set.verbose = 1;
     
     // check if the connection has already been established
     if (ssl_connection_complete == connssl->state) {
