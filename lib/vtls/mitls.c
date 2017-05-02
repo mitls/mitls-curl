@@ -39,7 +39,7 @@
 #include "parsedate.h"
 #include "connect.h" /* for the connect timeout */
 #include "select.h"
-#include "rawstr.h"
+//#include "rawstr.h"
 #include "curl_printf.h"
 #include "curl_memory.h"
 /* The last #include file should be: */
@@ -119,11 +119,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn,
 CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    int sockindex,
                                    bool blocking);
-CURLcode Curl_mitls_RecvRecord(struct SessionHandle *data,
-                               mitls_context *connmitls,
-                               curl_socket_t sockfd,
-                               bool blocking);
-void Curl_mitls_process_messages(struct SessionHandle *data,
+void Curl_mitls_process_messages(struct Curl_easy *data,
                                  char *outmsg, char *errmsg);
 int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
                              const void *buffer,
@@ -147,7 +143,7 @@ void Curl_mitls_cleanup(void)
   FFI_mitls_cleanup();
 }
 
-void Curl_mitls_process_messages(struct SessionHandle *data,
+void Curl_mitls_process_messages(struct Curl_easy *data,
                                  char *outmsg,
                                  char *errmsg)
 {
@@ -168,7 +164,7 @@ ssize_t Curl_mitls_send(struct connectdata *conn,
                         size_t len,
                         CURLcode *curlcode)
 {
-  struct SessionHandle *data = conn->data;
+  struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
   int result;
@@ -193,7 +189,7 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
                         size_t buffersize,
                         CURLcode *curlcode)
 {
-  struct SessionHandle *data = conn->data;
+  struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
   char *outmsg = NULL;
@@ -229,17 +225,29 @@ retry:
 /* Initializes and configures miTLS */
 CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 {
-  struct SessionHandle *data = conn->data;
+  struct Curl_easy *data = conn->data;
   curl_socket_t sockfd = conn->sock[sockindex];
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = NULL;
-  char *ssl_sessionid;
+  void *ssl_sessionid;
   size_t ssl_sessionid_len;
   char *outmsg = NULL;
   char *errmsg = NULL;
   int result;
   CURLcode ret = CURLE_SSL_CONNECT_ERROR;
   const char *tls_version = NULL;
+
+  const long int ssl_version = SSL_CONN_CONFIG(version);
+#ifdef USE_TLS_SRP
+  const enum CURL_TLSAUTH ssl_authtype = SSL_SET_OPTION(authtype);
+#endif
+  char * const ssl_cert = SSL_SET_OPTION(cert);
+  const char * const ssl_cert_type = SSL_SET_OPTION(cert_type);
+  const char * const ssl_cafile = SSL_CONN_CONFIG(CAfile);
+  const char * const ssl_capath = SSL_CONN_CONFIG(CApath);
+  const bool verifypeer = SSL_CONN_CONFIG(verifypeer);
+  const char * const ssl_crlfile = SSL_SET_OPTION(CRLfile);
+  
 
   if(connssl->mitls_ctx) {
     free(connssl->mitls_ctx);
@@ -251,7 +259,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   }
   memset(connmitls, 0, sizeof(*connmitls));
   connssl->mitls_ctx = connmitls;
-  switch(data->set.ssl.version) {
+  switch(ssl_version) {
   case CURL_SSLVERSION_DEFAULT:
   case CURL_SSLVERSION_TLSv1_2:
     tls_version = mitls_TLS_V12;
@@ -264,57 +272,38 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     return CURLE_SSL_CONNECT_ERROR;
   }
 
-  if(data->set.str[STRING_KEY]) {
-    infof(data, "WARNING: SSL: CURLOPT_SSLKEY is ignored by miTLS.  "
-                "The private key must be in the Keychain.\n");
+  if(ssl_cert) {
+    infof(data, "WARNING: SSL: cert is ignored by miTLS.\n");
   }
-  if(data->set.str[STRING_CERT]) {
-    infof(data, "WARNING: SSL: STRING_CERT is ignored by miTLS.\n");
+  if(ssl_cert_type) {
+    infof(data, "WARNING: SSL: cert_type is ignored by miTLS.\n");
   }
-  if(data->set.ssl.verifypeer) {
-    infof(data, "WARNING: SSL: verifypeer is ignored by miTLS.\n");
+  if(ssl_cafile) {
+    infof(data, "WARNING: SSL: CAfile is ignored by miTLS.\n");
   }
-  if(data->set.str[STRING_SSL_CAFILE]) {
-    infof(data, "WARNING: SSL: STRING_SSL_CAFILE is ignored by miTLS.\n");
+  if(ssl_capath) {
+    infof(data, "WARNING: SSL: CApath is ignored by miTLS.\n");
   }
-  if(data->set.ssl.verifyhost) {
+  if(verifypeer) {
     infof(data, "WARNING: SSL: verifyhost is ignored by miTLS.\n");
+  }
+  if(ssl_crlfile) {
+    infof(data, "WARNING: SSL: CRTfile is ignored by miTLS.\n");
   }
 
   /* Check if there's a cached ID we can/should use here! */
-  Curl_ssl_sessionid_lock(conn);
-  if(!Curl_ssl_getsessionid(conn,
-                            (void **)&ssl_sessionid,
-                            &ssl_sessionid_len)) {
-    /* we got a session id, use it! */
+  if(SSL_SET_OPTION(primary.sessionid)) {
+	Curl_ssl_sessionid_lock(conn);
+    if(!Curl_ssl_getsessionid(conn, &ssl_sessionid, NULL, sockindex)) {
+      /* we got a session id, use it! */
 
-    /* bugbug: use it for something.
-       SSLSetPeerID(connssl->ssl_ctx, ssl_sessionid, ssl_sessionid_len); */
+      /* bugbug: use it for something.
+         SSLSetPeerID(connssl->ssl_ctx, ssl_sessionid, ssl_sessionid_len); */
 
-    Curl_ssl_sessionid_unlock(conn);
-    /* Informational message */
-    infof(data, "SSL re-using session ID %*s\n",
-                ssl_sessionid_len, ssl_sessionid);
-  }
-  else {
-    /* If there isn't one, then let's make one up! This has to be done prior
-       to starting the handshake. */
-    CURLcode r;
-    ssl_sessionid =
-      aprintf("%s:%d:%d:%s:%hu", data->set.str[STRING_SSL_CAFILE],
-              data->set.ssl.verifypeer, data->set.ssl.verifyhost,
-              conn->host.name, conn->remote_port);
-    ssl_sessionid_len = strlen(ssl_sessionid);
-
-    /* bugbug: use it for something.
-       SSLSetPeerID(connssl->ssl_ctx, ssl_sessionid, ssl_sessionid_len); */
-
-    r = Curl_ssl_addsessionid(conn, ssl_sessionid, ssl_sessionid_len);
-    Curl_ssl_sessionid_unlock(conn);
-    if(r) {
-      failf(data, "failed to store ssl session\n");
-      return r;
-    }
+      Curl_ssl_sessionid_unlock(conn);
+      /* Informational message */
+     infof(data, "SSL re-using session ID\n");
+	}
   }
 
   /* Create a miTLS-side config object representing the TLS connection
@@ -333,58 +322,6 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   return ret;
 }
 
-CURLcode Curl_mitls_RecvRecord(struct SessionHandle *data,
-                               mitls_context *connmitls,
-                               curl_socket_t sockfd,
-                               bool blocking)
-{
-  ssize_t RecvResult;
-  ssize_t RecordLength;
-  size_t i;
-
-  connmitls->record_length = 0;
-
-  /* Read in the 5-byte record header */
-  RecvResult = recv(sockfd, connmitls->header, sizeof(connmitls->header), 0);
-  if(RecvResult != sizeof(connmitls->header)) {
-    if(errno == EAGAIN || errno == EWOULDBLOCK) {
-      return CURLE_AGAIN;
-    }
-    failf(data, "Header recv failed %p %d", RecvResult, errno);
-    return CURLE_RECV_ERROR;
-  }
-  if(RecvResult != sizeof(connmitls->header)) {
-    failf(data, "Header too small\n");
-    return CURLE_RECV_ERROR;
-  }
-  /* RecordLength is big-endian in the header. */
-  RecordLength = (((ushort)(unsigned char)connmitls->header[3] << 8)) +
-                 (ushort)(unsigned char)connmitls->header[4];
-  if(RecordLength > (ssize_t)sizeof(connmitls->record)) {
-    /* The record length is much too long */
-    return CURLE_SSL_CONNECT_ERROR;
-  }
-
-  if(!blocking) {
-    /* Set the socket to blocking */
-    curlx_nonblock(sockfd, FALSE);
-  }
-
-  /* Read in the record data */
-  RecvResult = recv(sockfd, connmitls->record, RecordLength, 0);
-  if(RecvResult != RecordLength) {
-    failf(data, "Record recv failed %p %d", RecvResult, errno);
-    return CURLE_RECV_ERROR;
-  }
-
-  if(!blocking) {
-    /* Reset it back to nonblocking */
-    curlx_nonblock(sockfd, TRUE);
-  }
-  connmitls->record_length = RecordLength;
-  return CURLE_OK;
-}
-
 /* This is called by miTLS within FFI_mitls_connect() */
 int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
                              const void *buffer,
@@ -396,7 +333,7 @@ int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
 retry:
   SendResult = send(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
   if((size_t)SendResult != buffer_size) {
-    struct SessionHandle *data = ctx->conn->data;
+    struct Curl_easy *data = ctx->conn->data;
     int e = errno;
     if(e == EAGAIN || e == EWOULDBLOCK) {
       infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK."
@@ -421,7 +358,7 @@ int Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
                              size_t buffer_size)
 {
   mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
-  struct SessionHandle *data = ctx->conn->data;
+  struct Curl_easy *data = ctx->conn->data;
   ssize_t RecvResult;
 
   if(Curl_timeleft(data, NULL, TRUE) < 0) {
@@ -461,7 +398,7 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    int sockindex,
                                    bool blocking)
 {
-  struct SessionHandle *data = conn->data;
+  struct Curl_easy *data = conn->data;
   mitls_context *connmitls = (mitls_context*)conn->ssl[sockindex].mitls_ctx;
   int ret;
   curl_socket_t sockfd = conn->sock[sockindex];
@@ -492,6 +429,42 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
     struct ssl_connect_data *connssl = &conn->ssl[sockindex];
     infof(data, "FFI_mitls_connect succeeded.  Connection complete.");
     connssl->connecting_state = ssl_connect_done;
+	
+    if(SSL_SET_OPTION(primary.sessionid)) {
+      bool incache;
+      void *our_ssl_sessionid;
+      void *old_ssl_sessionid = NULL;
+
+      our_ssl_sessionid = NULL; /* bugbug: fetch from miTLS */
+
+      Curl_ssl_sessionid_lock(conn);
+      incache = !(Curl_ssl_getsessionid(conn, &old_ssl_sessionid, NULL,
+                                        sockindex));
+      if(incache) {
+        if(old_ssl_sessionid != our_ssl_sessionid) {
+          infof(data, "old SSL session ID is stale, removing\n");
+          Curl_ssl_delsessionid(conn, old_ssl_sessionid);
+          incache = FALSE;
+        }
+      }
+
+      if(!incache) {
+        result = Curl_ssl_addsessionid(conn, our_ssl_sessionid,
+                                        0 /* unknown size */, sockindex);
+        if(result) {
+          Curl_ssl_sessionid_unlock(conn);
+          failf(data, "failed to store ssl session");
+          return result;
+        }
+    }
+    else {
+      /* Session was incache, so refcount already incremented earlier.
+        */
+      ; /* bugbug: implement */
+    }
+    Curl_ssl_sessionid_unlock(conn);
+  }
+	
     result = CURLE_OK;
   }
 
@@ -509,7 +482,7 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn,
                                    bool *done)
 {
   CURLcode result;
-  struct SessionHandle *data = conn->data;
+  struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
 
   /* Uncomment this line in order to enable infof() to log to stderr in host

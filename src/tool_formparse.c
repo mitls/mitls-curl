@@ -21,13 +21,14 @@
  ***************************************************************************/
 #include "tool_setup.h"
 
-#include "rawstr.h"
+#include "strcase.h"
 
 #define ENABLE_CURLX_PRINTF
 /* use our own printf() functions */
 #include "curlx.h"
 
 #include "tool_cfgable.h"
+#include "tool_convert.h"
 #include "tool_mfiles.h"
 #include "tool_msgs.h"
 #include "tool_formparse.h"

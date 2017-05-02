@@ -29,7 +29,7 @@
 #include "curlx.h" /* from the private lib dir */
 
 /* just to please curl_base64.h we create a fake struct */
-struct SessionHandle {
+struct Curl_easy {
   int fake;
 };
 
@@ -190,7 +190,7 @@ static int appenddata(char  **dst_buf,   /* dest buffer */
 static int decodedata(char  **buf,   /* dest buffer */
                       size_t *len)   /* dest buffer data length */
 {
-  int error = 0;
+  CURLcode error = CURLE_OK;
   unsigned char *buf64 = NULL;
   size_t src_len = 0;
 
@@ -198,7 +198,7 @@ static int decodedata(char  **buf,   /* dest buffer */
     return GPE_OK;
 
   /* base64 decode the given buffer */
-  error = (int) Curl_base64_decode(*buf, &buf64, &src_len);
+  error = Curl_base64_decode(*buf, &buf64, &src_len);
   if(error)
     return GPE_OUT_OF_MEMORY;
 
@@ -309,7 +309,8 @@ int getpart(char **outbuf, size_t *outlen,
       ptr++;
       end = ptr;
       EAT_WORD(end);
-      if((len.sig = end - ptr) > MAX_TAG_LEN) {
+      len.sig = end - ptr;
+      if(len.sig > MAX_TAG_LEN) {
         error = GPE_NO_BUFFER_SPACE;
         break;
       }
@@ -370,7 +371,8 @@ int getpart(char **outbuf, size_t *outlen,
       /* get potential tag */
       end = ptr;
       EAT_WORD(end);
-      if((len.sig = end - ptr) > MAX_TAG_LEN) {
+      len.sig = end - ptr;
+      if(len.sig > MAX_TAG_LEN) {
         error = GPE_NO_BUFFER_SPACE;
         break;
       }
@@ -389,7 +391,8 @@ int getpart(char **outbuf, size_t *outlen,
       end = ptr;
       while(*end && ('>' != *end))
         end++;
-      if((len.sig = end - ptr) > MAX_TAG_LEN) {
+      len.sig = end - ptr;
+      if(len.sig > MAX_TAG_LEN) {
         error = GPE_NO_BUFFER_SPACE;
         break;
       }

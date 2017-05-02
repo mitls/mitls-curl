@@ -367,7 +367,7 @@ delete $ENV{'CURL_CA_BUNDLE'} if($ENV{'CURL_CA_BUNDLE'});
 # Load serverpidfile hash with pidfile names for all possible servers.
 #
 sub init_serverpidfile_hash {
-  for my $proto (('ftp', 'http', 'imap', 'pop3', 'smtp')) {
+  for my $proto (('ftp', 'http', 'imap', 'pop3', 'smtp', 'http/2')) {
     for my $ssl (('', 's')) {
       for my $ipvnum ((4, 6)) {
         for my $idnum ((1, 2, 3)) {
@@ -387,7 +387,7 @@ sub init_serverpidfile_hash {
       }
     }
   }
-  for my $proto (('http', 'imap', 'pop3', 'smtp')) {
+  for my $proto (('http', 'imap', 'pop3', 'smtp', 'http/2')) {
     for my $ssl (('', 's')) {
       my $serv = servername_id("$proto$ssl", "unix", 1);
       my $pidf = server_pidfilename("$proto$ssl", "unix", 1);
@@ -1200,7 +1200,7 @@ sub runhttp2server {
     my $pidfile;
     my $logfile;
     my $flags = "";
-    my $proto="http2";
+    my $proto="http/2";
     my $ipvnum = 4;
     my $idnum = 0;
     my $exe = "$perl $srcdir/http2-server.pl";
@@ -1227,6 +1227,7 @@ sub runhttp2server {
 
     $flags .= "--pidfile \"$pidfile\" --logfile \"$logfile\" ";
     $flags .= "--port $HTTP2PORT ";
+    $flags .= "--connect $HOSTIP:$HTTPPORT ";
     $flags .= $verbose_flag if($debugprotocol);
 
     my $cmd = "$exe $flags";
@@ -2543,7 +2544,7 @@ sub checksystem {
                 # http2 enabled
                 $has_http2=1;
 
-                push @protocols, 'http2';
+                push @protocols, 'http/2';
             }
         }
         #
@@ -2653,7 +2654,7 @@ sub checksystem {
     logmsg sprintf("* Servers: %s", $stunnel?"SSL ":"");
     logmsg sprintf("%s", $http_ipv6?"HTTP-IPv6 ":"");
     logmsg sprintf("%s", $http_unix?"HTTP-unix ":"");
-    logmsg sprintf("%s\n", $ftp_ipv6?"FTP-IPv6 ":"OFF");
+    logmsg sprintf("%s\n", $ftp_ipv6?"FTP-IPv6 ":"");
 
     logmsg sprintf("* Env: %s%s", $valgrind?"Valgrind ":"",
                    $run_event_based?"event-based ":"");
@@ -2683,7 +2684,7 @@ sub checksystem {
         }
         logmsg sprintf("\n*   GOPHER/%d ", $GOPHERPORT);
         if($gopher_ipv6) {
-            logmsg sprintf("GOPHER-IPv6/%d", $GOPHERPORT);
+            logmsg sprintf("GOPHER-IPv6/%d", $GOPHER6PORT);
         }
         logmsg sprintf("\n*   SSH/%d ", $SSHPORT);
         logmsg sprintf("SOCKS/%d ", $SOCKSPORT);
@@ -3032,7 +3033,7 @@ sub singletest {
                     next;
                 }
             }
-            elsif($1 eq "http2") {
+            elsif($1 eq "http/2") {
                 if($has_http2) {
                     next;
                 }
@@ -3594,7 +3595,7 @@ sub singletest {
             $usevalgrind = 1;
             my $valgrindcmd = "$valgrind ";
             $valgrindcmd .= "$valgrind_tool " if($valgrind_tool);
-            $valgrindcmd .= "--leak-check=yes ";
+            $valgrindcmd .= "--quiet --leak-check=yes ";
             $valgrindcmd .= "--suppressions=$srcdir/valgrind.supp ";
            # $valgrindcmd .= "--gen-suppressions=all ";
             $valgrindcmd .= "--num-callers=16 ";
@@ -3792,7 +3793,7 @@ sub singletest {
     # run the postcheck command
     my @postcheck= getpart("client", "postcheck");
     if(@postcheck) {
-        $cmd = $postcheck[0];
+        $cmd = join("", @postcheck);
         chomp $cmd;
         subVariables \$cmd;
         if($cmd) {
@@ -4255,7 +4256,7 @@ sub startservers {
     for(@what) {
         my (@whatlist) = split(/\s+/,$_);
         my $what = lc($whatlist[0]);
-        $what =~ s/[^a-z0-9-]//g;
+        $what =~ s/[^a-z0-9\/-]//g;
 
         my $certfile;
         if($what =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|-unix|))$/) {
@@ -4341,15 +4342,15 @@ sub startservers {
                 $run{'gopher-ipv6'}="$pid $pid2";
             }
         }
-        elsif($what eq "http2") {
-            if(!$run{'http2'}) {
+        elsif($what eq "http/2") {
+            if(!$run{'http/2'}) {
                 ($pid, $pid2) = runhttp2server($verbose, $HTTP2PORT);
                 if($pid <= 0) {
                     return "failed starting HTTP/2 server";
                 }
-                logmsg sprintf ("* pid http => %d %d\n", $pid, $pid2)
+                logmsg sprintf ("* pid http/2 => %d %d\n", $pid, $pid2)
                     if($verbose);
-                $run{'http2'}="$pid $pid2";
+                $run{'http/2'}="$pid $pid2";
             }
         }
         elsif($what eq "http") {
