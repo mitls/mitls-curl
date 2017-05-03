@@ -39,7 +39,6 @@
 #include "parsedate.h"
 #include "connect.h" /* for the connect timeout */
 #include "select.h"
-//#include "rawstr.h"
 #include "curl_printf.h"
 #include "curl_memory.h"
 /* The last #include file should be: */
