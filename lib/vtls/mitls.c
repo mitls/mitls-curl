@@ -246,7 +246,6 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   const char * const ssl_capath = SSL_CONN_CONFIG(CApath);
   const bool verifypeer = SSL_CONN_CONFIG(verifypeer);
   const char * const ssl_crlfile = SSL_SET_OPTION(CRLfile);
-  
 
   if(connssl->mitls_ctx) {
     free(connssl->mitls_ctx);
@@ -292,7 +291,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 
   /* Check if there's a cached ID we can/should use here! */
   if(SSL_SET_OPTION(primary.sessionid)) {
-	Curl_ssl_sessionid_lock(conn);
+    Curl_ssl_sessionid_lock(conn);
     if(!Curl_ssl_getsessionid(conn, &ssl_sessionid, NULL, sockindex)) {
       /* we got a session id, use it! */
 
@@ -302,7 +301,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
       Curl_ssl_sessionid_unlock(conn);
       /* Informational message */
      infof(data, "SSL re-using session ID\n");
-	}
+    }
   }
 
   /* Create a miTLS-side config object representing the TLS connection
@@ -428,7 +427,7 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
     struct ssl_connect_data *connssl = &conn->ssl[sockindex];
     infof(data, "FFI_mitls_connect succeeded.  Connection complete.");
     connssl->connecting_state = ssl_connect_done;
-	
+
     if(SSL_SET_OPTION(primary.sessionid)) {
       bool incache;
       void *our_ssl_sessionid;
@@ -463,7 +462,7 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
     }
     Curl_ssl_sessionid_unlock(conn);
   }
-	
+
     result = CURLE_OK;
   }
 
@@ -500,7 +499,7 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn,
     return CURLE_OPERATION_TIMEDOUT;
   }
 
-  switch (connssl->connecting_state) {
+  switch(connssl->connecting_state) {
   case ssl_connect_1:
     result = Curl_mitls_connect_step_1(conn, sockindex);
     return result;

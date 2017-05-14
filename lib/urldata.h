@@ -349,7 +349,7 @@ struct ssl_connect_data {
   bool ssl_direction; /* true if writing, false if reading */
   size_t ssl_write_buffered_length;
 #elif defined(USE_MITLS)
-  void * mitls_ctx;
+  void *mitls_ctx;
 #elif defined(USE_SSL)
 #error "SSL backend specific information missing from ssl_connect_data"
 #endif
