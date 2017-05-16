@@ -2063,6 +2063,7 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
           DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib"
           export LD_LIBRARY_PATH
           export DYLD_LIBRARY_PATH
+	  LDFLAGS="-Wl,-rpath=$mitlslib $LDFLAGS"
           AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH and DYLD_LIBRARY_PATH])
         fi
       fi
