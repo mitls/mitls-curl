@@ -47,11 +47,6 @@
 /* Functions exported from libmitls.dll */
 #include <mitlsffi.h>
 
-/* bugbug: temporarily Suppress some warnings enabled in the debug build */
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wpedantic" /* for uses of __FUNCTION__ */
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-
 /* ssl_connect_state usage
    This enum is initialized to 0/ssl_connect_1 ahead of calling
    Curl_mitls_connect*().  It is not interpreted
@@ -88,14 +83,6 @@ typedef struct {
 /* This is miTLS-specific state, stored inside the ssl_connect_data */
 typedef struct {
   mitls_state * mitls_config;
-
-  ssize_t record_length;      /* actual # of bytes in record[] */
-  char header[5];             /* 5-byte header for TLS records */
-  char record[65536];         /* the remainder of the TLS record (max of
-                                 max_TLSCiphertext_fragment_length during
-                                 TLS negotiation, but longer for recv()
-                                 later */
-
   mitls_callback_context callback;
 } mitls_context;
 
@@ -120,10 +107,10 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    bool blocking);
 void Curl_mitls_process_messages(struct Curl_easy *data,
                                  char *outmsg, char *errmsg);
-int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
                              const void *buffer,
                              size_t buffer_size);
-int Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
                              void *buffer,
                              size_t buffer_size);
 
@@ -203,7 +190,7 @@ retry:
   Curl_mitls_process_messages(data, outmsg, errmsg);
   if(packet == NULL) {
     *curlcode = CURLE_RECV_ERROR;
-    failf(data, "Leaving %s -1 after failed FFI\n", __FUNCTION__);
+    failf(data, "Leaving Curl_mitls_recv -1 after failed FFI\n");
     return -1;
   }
   infof(data, "Curl_mitls_recv got %d bytes.  Caller asked for %d bytes.\n",
@@ -225,16 +212,15 @@ retry:
 CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 {
   struct Curl_easy *data = conn->data;
-  curl_socket_t sockfd = conn->sock[sockindex];
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = NULL;
   void *ssl_sessionid;
-  size_t ssl_sessionid_len;
   char *outmsg = NULL;
   char *errmsg = NULL;
   int result;
   CURLcode ret = CURLE_SSL_CONNECT_ERROR;
   const char *tls_version = NULL;
+  char *ciphers;
 
   const long int ssl_version = SSL_CONN_CONFIG(version);
 #ifdef USE_TLS_SRP
@@ -246,6 +232,8 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   const char * const ssl_capath = SSL_CONN_CONFIG(CApath);
   const bool verifypeer = SSL_CONN_CONFIG(verifypeer);
   const char * const ssl_crlfile = SSL_SET_OPTION(CRLfile);
+  const char * const ssl_key = SSL_SET_OPTION(key);
+  const char * const ssl_key_type = SSL_SET_OPTION(key_type);
 
   if(connssl->mitls_ctx) {
     free(connssl->mitls_ctx);
@@ -270,23 +258,20 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     return CURLE_SSL_CONNECT_ERROR;
   }
 
-  if(ssl_cert) {
-    infof(data, "WARNING: SSL: cert is ignored by miTLS.\n");
-  }
   if(ssl_cert_type) {
     infof(data, "WARNING: SSL: cert_type is ignored by miTLS.\n");
-  }
-  if(ssl_cafile) {
-    infof(data, "WARNING: SSL: CAfile is ignored by miTLS.\n");
   }
   if(ssl_capath) {
     infof(data, "WARNING: SSL: CApath is ignored by miTLS.\n");
   }
   if(verifypeer) {
-    infof(data, "WARNING: SSL: verifyhost is ignored by miTLS.\n");
+    infof(data, "WARNING: SSL: verifypeer is ignored by miTLS.\n");
   }
   if(ssl_crlfile) {
     infof(data, "WARNING: SSL: CRTfile is ignored by miTLS.\n");
+  }
+  if(ssl_key_type) {
+    infof(data, "WARNING: SSL: key_type is ignored by miTLS.\n");
   }
 
   /* Check if there's a cached ID we can/should use here! */
@@ -312,16 +297,48 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
                                &outmsg,
                                &errmsg);
   Curl_mitls_process_messages(data, outmsg, errmsg);
-  if(result != 0) {
-    /* Configuration succeeded. Begin connecting */
-    connssl->connecting_state = ssl_connect_2;
-    ret = CURLE_OK;
+  if(result == 0) {
+	failf(data, "FFI_mitls_configure failed\n");
+	return ret;
   }
-  return ret;
+  if(ssl_cafile) {
+	result = FFI_mitls_configure_ca_file(connmitls->mitls_config, ssl_cafile);
+	if (result == 0) {
+	  failf(data, "FFI_mitls_configure_ca_file failed\n");
+	  return ret;
+	}
+  }
+  if(ssl_cert) {
+	result = FFI_mitls_configure_cert_chain_file(connmitls->mitls_config, ssl_cert);
+	if (result == 0) {
+	  failf(data, "FFI_mitls_configure_cert_chain_file failed\n");
+	  return ret;
+	}
+  }
+  if(ssl_key) {
+	result = FFI_mitls_configure_private_key_file(connmitls->mitls_config, ssl_key);
+	if (result == 0) {
+	  failf(data, "FFI_mitls_configure_private_key_file failed\n");
+	  return ret;
+	}
+  }
+  ciphers = SSL_CONN_CONFIG(cipher_list);
+  if(ciphers) {
+	result = FFI_mitls_configure_cipher_suites(connmitls->mitls_config, ciphers);
+	if (result == 0) {
+	  failf(data, "FFI_mitls_configure_cipher_suites failed\n");
+	  return ret;
+	}
+  }
+  /* bugbug: signature algorithm and named groups are not supported by curl */
+
+  /* Configuration succeeded. Begin connecting */
+  connssl->connecting_state = ssl_connect_2;
+  return CURLE_OK;
 }
 
 /* This is called by miTLS within FFI_mitls_connect() */
-int Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
                              const void *buffer,
                              size_t buffer_size)
 {
@@ -351,7 +368,7 @@ retry:
 }
 
 /* This is called by miTLS within FFI_mitls_connect() */
-int Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
                              void *buffer,
                              size_t buffer_size)
 {
@@ -518,7 +535,7 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn,
     return CURLE_FAILED_INIT;
   }
 
-  failf(data, "Unexpected exit from %s", __FUNCTION__);
+  failf(data, "Unexpected exit from Curl_mitls_connect_common");
   return CURLE_FAILED_INIT;
 }
 
@@ -560,6 +577,7 @@ void Curl_mitls_close(struct connectdata *conn, int sockindex)
 
 void Curl_mitls_session_free(void *ptr)
 {
+  (void)ptr;
 }
 
 size_t Curl_mitls_version(char *buffer, size_t size)
@@ -572,6 +590,8 @@ size_t Curl_mitls_version(char *buffer, size_t size)
 }
 int Curl_mitls_shutdown(struct connectdata *conn, int sockindex)
 {
+  (void)conn;
+  (void)sockindex;
   return 0; /* success */
 }
 
@@ -580,6 +600,10 @@ void Curl_mitls_sha256sum(const unsigned char *tmp, /* input */
                       unsigned char *sha256sum /* output */,
                       size_t unused)
 {
+  (void)tmp;
+  (void)tmplen;
+  (void)sha256sum;
+  (void)unused;
 }
 
 #endif /* USE_MITLS */
