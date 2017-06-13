@@ -88,7 +88,6 @@ typedef struct {
 
 CURLcode Curl_mitls_connect_common(struct connectdata *conn,
                                    int sockindex,
-                                   bool blocking,
                                    bool *done);
 ssize_t Curl_mitls_send(struct connectdata *conn,
                         int sockindex,
@@ -103,8 +102,7 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
 CURLcode Curl_mitls_connect_step_1(struct connectdata *conn,
                                    int sockindex);
 CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
-                                   int sockindex,
-                                   bool blocking);
+                                   int sockindex);
 void Curl_mitls_process_messages(struct Curl_easy *data,
                                  char *outmsg, char *errmsg);
 int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
@@ -343,28 +341,40 @@ int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbac
                              size_t buffer_size)
 {
   mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
+  struct Curl_easy *data = ctx->conn->data;
+  ssize_t Remaining = (ssize_t)buffer_size;
   ssize_t SendResult;
+  const char *RemainingBuffer = (const char*)buffer;
 
-retry:
-  SendResult = send(ctx->conn->sock[ctx->sockindex], buffer, buffer_size, 0);
-  if((size_t)SendResult != buffer_size) {
-    struct Curl_easy *data = ctx->conn->data;
-    int e = errno;
-    if(e == EAGAIN || e == EWOULDBLOCK) {
-      infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK."
-                  "  Trying again\n");
-       Curl_wait_ms(5);
-      goto retry;
+  while (Remaining) {
+    if(Curl_timeleft(data, NULL, TRUE) < 0) {
+      /* no need to continue if time already is up */
+      failf(data, "SSL connection send() timeout");
+      return -1;
+    }
+    SendResult = send(ctx->conn->sock[ctx->sockindex], RemainingBuffer, Remaining, 0);
+    if (SendResult < 0) {
+      int e = errno;
+      if(e == EAGAIN || e == EWOULDBLOCK) {
+        infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK."
+                    "  Trying again\n");
+         Curl_wait_ms(1);
+      }
+      else {
+        char msg[128];
+        strerror_r(e, msg, sizeof(msg));
+        infof(data, "Curl_mitls_send_callback():  Unknown errno %d - %s\n",
+                    e, msg);
+		return -1;
+      }
     }
     else {
-      char msg[128];
-      strerror_r(e, msg, sizeof(msg));
-      infof(data, "Curl_mitls_send_callback():  Unknown errno %d - %s\n",
-                  e, msg);
+	  Remaining -= SendResult;
+	  RemainingBuffer += SendResult;
     }
   }
 
-  return (int)SendResult;
+  return (int)buffer_size;
 }
 
 /* This is called by miTLS within FFI_mitls_connect() */
@@ -375,48 +385,49 @@ int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbac
   mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
   struct Curl_easy *data = ctx->conn->data;
   ssize_t RecvResult;
+  ssize_t Remaining = buffer_size;
+  char *RecvBuffer = (char*)buffer;
 
-  if(Curl_timeleft(data, NULL, TRUE) < 0) {
-    /* no need to continue if time already is up */
-    failf(data, "SSL connection timeout");
-    return -1;
+  while (Remaining) {
+    if(Curl_timeleft(data, NULL, TRUE) < 0) {
+      /* no need to continue if time already is up */
+      failf(data, "SSL connection recv() timeout");
+      return -1;
+    }
+
+    RecvResult = recv(ctx->conn->sock[ctx->sockindex],
+                      RecvBuffer, Remaining,
+                      0);
+    if(RecvResult < 0) {
+      int e = errno;
+      if(e == EAGAIN || e == EWOULDBLOCK) {
+        infof(data,
+             "Curl_mitls_recv_callback():  EAGAIN or EWOULDBLOCK\n");
+        Curl_wait_ms(1);
+      }
+      else {
+        char msg[128];
+        strerror_r(e, msg, sizeof(msg));
+        infof(data, "Curl_mitls_recv_callback():  Unknown errno %d - %s\n",
+              e, msg);
+	    return -1;
+      }
+	} else {
+		Remaining -= RecvResult;
+		RecvBuffer += RecvResult;
+	}
   }
 
-  /* BUGBUG: Set the socket to blocking.
-     MITLS doesn't support non-blocking recv(). */
-  curlx_nonblock(ctx->conn->sock[ctx->sockindex], FALSE);
-retry:
-  RecvResult = recv(ctx->conn->sock[ctx->sockindex],
-                    buffer, buffer_size,
-                    0);
-  if((size_t)RecvResult != buffer_size) {
-    int e = errno;
-    if(e == EAGAIN || e == EWOULDBLOCK) {
-      infof(data,
-           "Curl_mitls_recv_callback():  EAGAIN or EWOULDBLOCK\n");
-      Curl_wait_ms(5);
-      goto retry;
-    }
-    else {
-      char msg[128];
-      strerror_r(e, msg, sizeof(msg));
-      infof(data, "Curl_mitls_recv_callback():  Unknown errno %d - %s\n",
-            e, msg);
-    }
-  }
-
-  return (int)RecvResult;
+  return (int)buffer_size;
 }
 
 
 CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
-                                   int sockindex,
-                                   bool blocking)
+                                   int sockindex)
 {
   struct Curl_easy *data = conn->data;
   mitls_context *connmitls = (mitls_context*)conn->ssl[sockindex].mitls_ctx;
   int ret;
-  curl_socket_t sockfd = conn->sock[sockindex];
   CURLcode result = CURLE_FAILED_INIT;
   char *outmsg;
   char *errmsg;
@@ -425,11 +436,6 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
   connmitls->callback.cb.recv = Curl_mitls_recv_callback;
   connmitls->callback.conn = conn;
   connmitls->callback.sockindex = sockindex;
-
-  if(!blocking) {
-    /* Set the socket to blocking */
-    curlx_nonblock(sockfd, FALSE);
-  }
 
   ret = FFI_mitls_connect(&connmitls->callback.cb,
                           connmitls->mitls_config,
@@ -483,17 +489,11 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
     result = CURLE_OK;
   }
 
-  if(!blocking) {
-    /* Set the socket back to nonblocking */
-    curlx_nonblock(sockfd, TRUE);
-  }
-
   return result;
 }
 
 CURLcode Curl_mitls_connect_common(struct connectdata *conn,
                                    int sockindex,
-                                   bool blocking,
                                    bool *done)
 {
   CURLcode result;
@@ -521,7 +521,7 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn,
     result = Curl_mitls_connect_step_1(conn, sockindex);
     return result;
   case ssl_connect_2:
-    result = Curl_mitls_connect_step_2(conn, sockindex, blocking);
+    result = Curl_mitls_connect_step_2(conn, sockindex);
     return result;
   case ssl_connect_done:
     connssl->connecting_state = ssl_connect_1;
@@ -545,7 +545,7 @@ CURLcode Curl_mitls_connect(struct connectdata *conn, int sockindex)
   bool done = FALSE;
   CURLcode retval;
 
-  retval = Curl_mitls_connect_common(conn, sockindex, TRUE, &done);
+  retval = Curl_mitls_connect_common(conn, sockindex, &done);
   return retval;
 }
 
@@ -556,7 +556,7 @@ CURLcode Curl_mitls_connect_nonblocking(struct connectdata *conn,
 {
   CURLcode retval;
 
-  retval = Curl_mitls_connect_common(conn, sockindex, FALSE, done);
+  retval = Curl_mitls_connect_common(conn, sockindex, done);
   return retval;
 }
 
