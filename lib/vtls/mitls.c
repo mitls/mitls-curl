@@ -106,10 +106,12 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    int sockindex);
 void Curl_mitls_process_messages(struct Curl_easy *data,
                                  char *outmsg, char *errmsg);
-int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_send_callback(
+                             struct _FFI_mitls_callbacks *callbacks,
                              const void *buffer,
                              size_t buffer_size);
-int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
+int MITLS_CALLCONV Curl_mitls_recv_callback(
+                             struct _FFI_mitls_callbacks *callbacks,
                              void *buffer,
                              size_t buffer_size);
 
@@ -297,37 +299,41 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
                                &errmsg);
   Curl_mitls_process_messages(data, outmsg, errmsg);
   if(result == 0) {
-	failf(data, "FFI_mitls_configure failed\n");
-	return ret;
+    failf(data, "FFI_mitls_configure failed\n");
+    return ret;
   }
   if(ssl_cafile) {
-	result = FFI_mitls_configure_ca_file(connmitls->mitls_config, ssl_cafile);
-	if (result == 0) {
-	  failf(data, "FFI_mitls_configure_ca_file failed\n");
-	  return ret;
-	}
+    result = FFI_mitls_configure_ca_file(connmitls->mitls_config,
+                                         ssl_cafile);
+    if(result == 0) {
+      failf(data, "FFI_mitls_configure_ca_file failed\n");
+      return ret;
+    }
   }
   if(ssl_cert) {
-	result = FFI_mitls_configure_cert_chain_file(connmitls->mitls_config, ssl_cert);
-	if (result == 0) {
-	  failf(data, "FFI_mitls_configure_cert_chain_file failed\n");
-	  return ret;
-	}
+    result = FFI_mitls_configure_cert_chain_file(connmitls->mitls_config,
+                                                 ssl_cert);
+    if(result == 0) {
+      failf(data, "FFI_mitls_configure_cert_chain_file failed\n");
+      return ret;
+    }
   }
   if(ssl_key) {
-	result = FFI_mitls_configure_private_key_file(connmitls->mitls_config, ssl_key);
-	if (result == 0) {
-	  failf(data, "FFI_mitls_configure_private_key_file failed\n");
-	  return ret;
-	}
+    result = FFI_mitls_configure_private_key_file(connmitls->mitls_config,
+                                                  ssl_key);
+    if(result == 0) {
+      failf(data, "FFI_mitls_configure_private_key_file failed\n");
+      return ret;
+    }
   }
   ciphers = SSL_CONN_CONFIG(cipher_list);
   if(ciphers) {
-	result = FFI_mitls_configure_cipher_suites(connmitls->mitls_config, ciphers);
-	if (result == 0) {
-	  failf(data, "FFI_mitls_configure_cipher_suites failed\n");
-	  return ret;
-	}
+    result = FFI_mitls_configure_cipher_suites(connmitls->mitls_config,
+                                               ciphers);
+    if(result == 0) {
+      failf(data, "FFI_mitls_configure_cipher_suites failed\n");
+      return ret;
+    }
   }
   /* bugbug: signature algorithm and named groups are not supported by curl */
 
@@ -354,10 +360,10 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 
     *list_len = curlx_uitous(cur);
     result = FFI_mitls_configure_alpn(connmitls->mitls_config, alpn_buffer);
-	if (result == 0) {
-	  failf(data, "FFI_mitls_configure_alpn failed\n");
-	  return ret;
-	}
+    if(result == 0) {
+      failf(data, "FFI_mitls_configure_alpn failed\n");
+      return ret;
+    }
   }
   /* Configuration succeeded. Begin connecting */
   connssl->connecting_state = ssl_connect_2;
@@ -365,24 +371,26 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 }
 
 /* This is called by miTLS within FFI_mitls_connect() */
-int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbacks,
-                             const void *buffer,
-                             size_t buffer_size)
+int MITLS_CALLCONV Curl_mitls_send_callback(
+  struct _FFI_mitls_callbacks *callbacks,
+  const void *buffer,
+  size_t buffer_size)
 {
   mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
   struct Curl_easy *data = ctx->conn->data;
   ssize_t Remaining = (ssize_t)buffer_size;
   ssize_t SendResult;
-  const char *RemainingBuffer = (const char*)buffer;
+  const char *RemainingBuffer = (const char *)buffer;
 
-  while (Remaining) {
+  while(Remaining) {
     if(Curl_timeleft(data, NULL, TRUE) < 0) {
       /* no need to continue if time already is up */
       failf(data, "SSL connection send() timeout");
       return -1;
     }
-    SendResult = send(ctx->conn->sock[ctx->sockindex], RemainingBuffer, Remaining, 0);
-    if (SendResult < 0) {
+    SendResult = send(ctx->conn->sock[ctx->sockindex],
+                      RemainingBuffer, Remaining, 0);
+    if(SendResult < 0) {
       int e = errno;
       if(e == EAGAIN || e == EWOULDBLOCK) {
         infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK."
@@ -394,12 +402,12 @@ int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbac
         strerror_r(e, msg, sizeof(msg));
         infof(data, "Curl_mitls_send_callback():  Unknown errno %d - %s\n",
                     e, msg);
-		return -1;
+        return -1;
       }
     }
     else {
-	  Remaining -= SendResult;
-	  RemainingBuffer += SendResult;
+      Remaining -= SendResult;
+      RemainingBuffer += SendResult;
     }
   }
 
@@ -407,17 +415,18 @@ int MITLS_CALLCONV Curl_mitls_send_callback(struct _FFI_mitls_callbacks *callbac
 }
 
 /* This is called by miTLS within FFI_mitls_connect() */
-int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbacks,
-                             void *buffer,
-                             size_t buffer_size)
+int MITLS_CALLCONV Curl_mitls_recv_callback(
+  struct _FFI_mitls_callbacks *callbacks,
+  void *buffer,
+  size_t buffer_size)
 {
   mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
   struct Curl_easy *data = ctx->conn->data;
   ssize_t RecvResult;
   ssize_t Remaining = buffer_size;
-  char *RecvBuffer = (char*)buffer;
+  char *RecvBuffer = (char *)buffer;
 
-  while (Remaining) {
+  while(Remaining) {
     if(Curl_timeleft(data, NULL, TRUE) < 0) {
       /* no need to continue if time already is up */
       failf(data, "SSL connection recv() timeout");
@@ -438,13 +447,14 @@ int MITLS_CALLCONV Curl_mitls_recv_callback(struct _FFI_mitls_callbacks *callbac
         char msg[128];
         strerror_r(e, msg, sizeof(msg));
         infof(data, "Curl_mitls_recv_callback():  Unknown errno %d - %s\n",
-              e, msg);
-	    return -1;
+          e, msg);
+        return -1;
       }
-	} else {
-		Remaining -= RecvResult;
-		RecvBuffer += RecvResult;
-	}
+    }
+    else {
+      Remaining -= RecvResult;
+      RecvBuffer += RecvResult;
+    }
   }
 
   return (int)buffer_size;
