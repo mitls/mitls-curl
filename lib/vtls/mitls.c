@@ -39,6 +39,7 @@
 #include "parsedate.h"
 #include "connect.h" /* for the connect timeout */
 #include "select.h"
+#include "warnless.h"
 #include "curl_printf.h"
 #include "curl_memory.h"
 /* The last #include file should be: */
@@ -330,6 +331,34 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   }
   /* bugbug: signature algorithm and named groups are not supported by curl */
 
+  if(conn->bits.tls_enable_alpn) {
+    char alpn_buffer[128];
+    int cur;
+    unsigned short* list_len;
+
+    list_len = (unsigned short*)&alpn_buffer[0];
+    cur = sizeof(unsigned short);
+
+#ifdef USE_NGHTTP2
+    if(data->set.httpversion >= CURL_HTTP_VERSION_2) {
+      memcpy(&alpn_buffer[cur], NGHTTP2_PROTO_ALPN, NGHTTP2_PROTO_ALPN_LEN);
+      cur += NGHTTP2_PROTO_ALPN_LEN;
+      infof(data, "ALPN, offering %s\n", NGHTTP2_PROTO_VERSION_ID);
+    }
+#endif
+
+    alpn_buffer[cur++] = ALPN_HTTP_1_1_LENGTH;
+    memcpy(&alpn_buffer[cur], ALPN_HTTP_1_1, ALPN_HTTP_1_1_LENGTH);
+    cur += ALPN_HTTP_1_1_LENGTH;
+    infof(data, "ALPN, offering %s\n", ALPN_HTTP_1_1);
+
+    *list_len = curlx_uitous(cur);
+    result = FFI_mitls_configure_alpn(connmitls->mitls_config, alpn_buffer);
+	if (result == 0) {
+	  failf(data, "FFI_mitls_configure_alpn failed\n");
+	  return ret;
+	}
+  }
   /* Configuration succeeded. Begin connecting */
   connssl->connecting_state = ssl_connect_2;
   return CURLE_OK;
