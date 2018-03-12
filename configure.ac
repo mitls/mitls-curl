@@ -2021,15 +2021,14 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
     addld=""
     addlib=""
     addcflags=""
-    polarssllib=""
 
     if test "x$USE_MITLS" != "xyes"; then
       dnl add the path and test again
-      addld=-L$OPT_MITLS/src/tls/$libsuff
+      addld=-L$OPT_MITLS/src/tls/extract/Kremlin-Library/$libsuff
       addcflags=-I$OPT_MITLS/libs/ffi
-      mitlslib=$OPT_MITLS/src/tls/$libsuff
+      mitlslib=$OPT_MITLS/src/tls/extract/Kremlin-Library/$libsuff
 
-      LDFLAGS="$LDFLAGS $addld"
+      LDFLAGS="$LDFLAGS  -L$OPT_MITLS/../MLCrypto/openssl -lcrypto $addld"
       if test "$addcflags" != "-I/usr/include"; then
          CPPFLAGS="$CPPFLAGS $addcflags"
       fi
@@ -2052,18 +2051,18 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
       AC_MSG_NOTICE([detected miTLS])
 
       LIBS="-lmitls $LIBS"
-      
+
       if test -n "$mitlslib"; then
         dnl when shared libs were found in a path that the run-time
         dnl linker doesn't search through, we need to add it to
         dnl LD_LIBRARY_PATH to prevent further configure tests to fail
         dnl due to this
         if test "x$cross_compiling" != "xyes"; then
-          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$mitlslib"
-          DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib"
+          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl"
+          DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl"
           export LD_LIBRARY_PATH
           export DYLD_LIBRARY_PATH
-	  LDFLAGS="-Wl,-rpath=$mitlslib $LDFLAGS"
+	  LDFLAGS="-Wl,-rpath=$mitlslib -Wl,-rpath=$OPT_MITLS/../MLCrypto/openssl $LDFLAGS"
           AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH and DYLD_LIBRARY_PATH])
         fi
       fi
