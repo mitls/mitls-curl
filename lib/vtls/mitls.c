@@ -31,6 +31,7 @@
 
 #ifdef USE_MITLS
 
+#include <pthread.h>
 #include "urldata.h"
 #include "sendf.h"
 #include "inet_pton.h"
@@ -75,17 +76,14 @@
 const char *mitls_TLS_V12 = "1.2";
 const char *mitls_TLS_V13 = "1.3";
 
-typedef struct {
-  struct _FFI_mitls_callbacks cb;
-  struct connectdata *conn;
-  int sockindex;
-} mitls_callback_context;
-
 /* This is miTLS-specific state, stored inside the ssl_connect_data */
 typedef struct {
   mitls_state * mitls_config;
-  mitls_callback_context callback;
+  struct connectdata *conn;
+  int sockindex;
 } mitls_context;
+
+void MITLS_CALLCONV Curl_mitls_trace_callback(const char *msg);
 
 CURLcode Curl_mitls_connect_common(struct connectdata *conn,
                                    int sockindex,
@@ -104,24 +102,38 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn,
                                    int sockindex);
 CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    int sockindex);
-void Curl_mitls_process_messages(struct Curl_easy *data,
-                                 char *outmsg, char *errmsg);
 int MITLS_CALLCONV Curl_mitls_send_callback(
-                             struct _FFI_mitls_callbacks *callbacks,
-                             const void *buffer,
+                             void *ctx,
+                             const unsigned char *buffer,
                              size_t buffer_size);
 int MITLS_CALLCONV Curl_mitls_recv_callback(
-                             struct _FFI_mitls_callbacks *callbacks,
-                             void *buffer,
+                             void *ctx,
+                             unsigned char *buffer,
                              size_t buffer_size);
+
+pthread_key_t mitls_tracekey;
+
+/* Called by miTLS */
+void MITLS_CALLCONV Curl_mitls_trace_callback(const char *msg)
+{
+  struct Curl_easy *data = (struct Curl_easy*)pthread_getspecific(mitls_tracekey);
+  if (data) {
+    infof(data, "%s", msg);
+  }
+}
 
 /* Called by CURL */
 int  Curl_mitls_init(void)
 {
   int retval;
 
+  if (pthread_key_create(&mitls_tracekey, NULL) != 0) {
+    return 0;
+  }
+  FFI_mitls_set_trace_callback(Curl_mitls_trace_callback);
   retval = FFI_mitls_init();
-  return retval;
+  // miTLS returns 0 for failure, nonzero for success.  CUrl expects 0 for failure and 1 for success.
+  return (retval == 0) ? 0 : 1;
 }
 
 /* Called by CURL */
@@ -130,19 +142,6 @@ void Curl_mitls_cleanup(void)
   FFI_mitls_cleanup();
 }
 
-void Curl_mitls_process_messages(struct Curl_easy *data,
-                                 char *outmsg,
-                                 char *errmsg)
-{
-  if(outmsg) {
-    infof(data, "mitls: %s", outmsg);
-    FFI_mitls_free_msg(outmsg);
-  }
-  if(errmsg) {
-    failf(data, "mitls: %s", errmsg);
-    FFI_mitls_free_msg(errmsg);
-  }
-}
 
 /* Called by CURL */
 ssize_t Curl_mitls_send(struct connectdata *conn,
@@ -155,11 +154,10 @@ ssize_t Curl_mitls_send(struct connectdata *conn,
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
   int result;
-  char *outmsg = NULL;
-  char *errmsg = NULL;
 
-  result = FFI_mitls_send(connmitls->mitls_config, mem, len, &outmsg, &errmsg);
-  Curl_mitls_process_messages(data, outmsg, errmsg);
+  pthread_setspecific(mitls_tracekey, data);
+
+  result = FFI_mitls_send(connmitls->mitls_config, mem, len);
   if(result == 0) {
     failf(data, "Failed FFI_mitls_prepare_send\n");
     *curlcode = CURLE_SEND_ERROR;
@@ -179,16 +177,14 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
   struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
-  char *outmsg = NULL;
-  char *errmsg = NULL;
   size_t packet_size = 0;
   void *packet;
 
+  pthread_setspecific(mitls_tracekey, data);
+
 retry:
   packet = FFI_mitls_receive(connmitls->mitls_config,
-             &packet_size,
-             &outmsg, &errmsg);
-  Curl_mitls_process_messages(data, outmsg, errmsg);
+                             &packet_size);
   if(packet == NULL) {
     *curlcode = CURLE_RECV_ERROR;
     failf(data, "Leaving Curl_mitls_recv -1 after failed FFI\n");
@@ -203,7 +199,7 @@ retry:
     packet_size = buffersize;
   }
   memcpy(buf, packet, packet_size);
-  FFI_mitls_free_packet(packet);
+  FFI_mitls_free_packet(connmitls->mitls_config, packet);
   *curlcode = CURLE_OK;
   return packet_size;
 }
@@ -216,8 +212,6 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   mitls_context *connmitls = NULL;
   void *ssl_sessionid;
-  char *outmsg = NULL;
-  char *errmsg = NULL;
   int result;
   CURLcode ret = CURLE_SSL_CONNECT_ERROR;
   const char *tls_version = NULL;
@@ -294,37 +288,22 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
      settings */
   result = FFI_mitls_configure(&connmitls->mitls_config,
                                tls_version,
-                               conn->host.name,
-                               &outmsg,
-                               &errmsg);
-  Curl_mitls_process_messages(data, outmsg, errmsg);
+                               conn->host.name);
   if(result == 0) {
     failf(data, "FFI_mitls_configure failed\n");
     return ret;
   }
   if(ssl_cafile) {
-    result = FFI_mitls_configure_ca_file(connmitls->mitls_config,
-                                         ssl_cafile);
-    if(result == 0) {
-      failf(data, "FFI_mitls_configure_ca_file failed\n");
-      return ret;
-    }
+    /* bugbug: handle a cafile */
+    infof(data, "WARNING: SSL: ssl_cafile is temporarily not supported.\n");
   }
   if(ssl_cert) {
-    result = FFI_mitls_configure_cert_chain_file(connmitls->mitls_config,
-                                                 ssl_cert);
-    if(result == 0) {
-      failf(data, "FFI_mitls_configure_cert_chain_file failed\n");
-      return ret;
-    }
+    /* bugbug: handle a cert chain file */
+    infof(data, "WARNING: SSL: ssl_cert is temporarily not supported.\n");
   }
   if(ssl_key) {
-    result = FFI_mitls_configure_private_key_file(connmitls->mitls_config,
-                                                  ssl_key);
-    if(result == 0) {
-      failf(data, "FFI_mitls_configure_private_key_file failed\n");
-      return ret;
-    }
+    /* bugbug: handle a private key file */
+    infof(data, "WARNING: SSL: ssl_key is temporarily not supported.\n");
   }
   ciphers = SSL_CONN_CONFIG(cipher_list);
   if(ciphers) {
@@ -372,12 +351,12 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 
 /* This is called by miTLS within FFI_mitls_connect() */
 int MITLS_CALLCONV Curl_mitls_send_callback(
-  struct _FFI_mitls_callbacks *callbacks,
-  const void *buffer,
+  void* ctx,
+  const unsigned char *buffer,
   size_t buffer_size)
 {
-  mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
-  struct Curl_easy *data = ctx->conn->data;
+  mitls_context *connmitls = (mitls_context*)ctx;
+  struct Curl_easy *data = connmitls->conn->data;
   ssize_t Remaining = (ssize_t)buffer_size;
   ssize_t SendResult;
   const char *RemainingBuffer = (const char *)buffer;
@@ -388,14 +367,14 @@ int MITLS_CALLCONV Curl_mitls_send_callback(
       failf(data, "SSL connection send() timeout");
       return -1;
     }
-    SendResult = send(ctx->conn->sock[ctx->sockindex],
+    SendResult = send(connmitls->conn->sock[connmitls->sockindex],
                       RemainingBuffer, Remaining, 0);
     if(SendResult < 0) {
       int e = errno;
       if(e == EAGAIN || e == EWOULDBLOCK) {
         infof(data, "Curl_mitls_send_callback():  EAGAIN or EWOULDBLOCK."
                     "  Trying again\n");
-         Curl_wait_ms(1);
+        Curl_wait_ms(1);
       }
       else {
         char msg[128];
@@ -416,12 +395,12 @@ int MITLS_CALLCONV Curl_mitls_send_callback(
 
 /* This is called by miTLS within FFI_mitls_connect() */
 int MITLS_CALLCONV Curl_mitls_recv_callback(
-  struct _FFI_mitls_callbacks *callbacks,
-  void *buffer,
+  void *ctx,
+  unsigned char *buffer,
   size_t buffer_size)
 {
-  mitls_callback_context *ctx = (mitls_callback_context*)callbacks;
-  struct Curl_easy *data = ctx->conn->data;
+  mitls_context *connmitls = (mitls_context*)ctx;
+  struct Curl_easy *data = connmitls->conn->data;
   ssize_t RecvResult;
   ssize_t Remaining = buffer_size;
   char *RecvBuffer = (char *)buffer;
@@ -433,7 +412,7 @@ int MITLS_CALLCONV Curl_mitls_recv_callback(
       return -1;
     }
 
-    RecvResult = recv(ctx->conn->sock[ctx->sockindex],
+    RecvResult = recv(connmitls->conn->sock[connmitls->sockindex],
                       RecvBuffer, Remaining,
                       0);
     if(RecvResult < 0) {
@@ -468,19 +447,14 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
   mitls_context *connmitls = (mitls_context*)conn->ssl[sockindex].mitls_ctx;
   int ret;
   CURLcode result = CURLE_FAILED_INIT;
-  char *outmsg;
-  char *errmsg;
 
-  connmitls->callback.cb.send = Curl_mitls_send_callback;
-  connmitls->callback.cb.recv = Curl_mitls_recv_callback;
-  connmitls->callback.conn = conn;
-  connmitls->callback.sockindex = sockindex;
+  connmitls->conn = conn;
+  connmitls->sockindex = sockindex;
 
-  ret = FFI_mitls_connect(&connmitls->callback.cb,
-                          connmitls->mitls_config,
-                          &outmsg, &errmsg);
-  Curl_mitls_process_messages(data, outmsg, errmsg);
-
+  ret = FFI_mitls_connect(connmitls,
+                          Curl_mitls_send_callback,
+                          Curl_mitls_recv_callback,
+                          connmitls->mitls_config);
   if(ret == 0) {
     failf(data, "FFI_mitls_connect failed");
     result = CURLE_FAILED_INIT;
@@ -538,6 +512,8 @@ CURLcode Curl_mitls_connect_common(struct connectdata *conn,
   CURLcode result;
   struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+
+  pthread_setspecific(mitls_tracekey, data);
 
   /* Uncomment this line in order to enable infof() to log to stderr in host
      apps that don't support verbose logging, such as git. */
@@ -602,6 +578,9 @@ CURLcode Curl_mitls_connect_nonblocking(struct connectdata *conn,
 void Curl_mitls_close(struct connectdata *conn, int sockindex)
 {
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+  struct Curl_easy *data = conn->data;
+
+  pthread_setspecific(mitls_tracekey, data);
 
   if(connssl->mitls_ctx) {
     mitls_context *connmitls =
@@ -612,6 +591,7 @@ void Curl_mitls_close(struct connectdata *conn, int sockindex)
     free(connssl->mitls_ctx);
     connssl->mitls_ctx = NULL;
   }
+  pthread_setspecific(mitls_tracekey, NULL);
 }
 
 void Curl_mitls_session_free(void *ptr)
