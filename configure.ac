@@ -2138,7 +2138,9 @@ AC_HELP_STRING([--with-mitls=PATH],[where to look for miTLS, PATH points to the 
 AC_HELP_STRING([--without-mitls], [disable miTLS detection]),
   OPT_MITLS=$withval)
 
-if test "$curl_ssl_msg" = "$init_ssl_msg"; then
+
+if test -z "$ssl_backends" -o "x$OPT_MITLS" != xno; then
+  ssl_msg=
 
   if test X"$OPT_MITLS" != Xno; then
 
@@ -2156,13 +2158,14 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
          AC_SUBST(USE_MITLS, [1])
          MITLS_ENABLED=1
          USE_MITLS="yes"
-         curl_ssl_msg="enabled (miTLS)"
+         ssl_msg="miTLS"
         ])
     fi
 
     addld=""
     addlib=""
     addcflags=""
+    mitlslib=""
 
     if test "x$USE_MITLS" != "xyes"; then
       dnl add the path and test again
@@ -2181,7 +2184,7 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
        AC_SUBST(USE_MITLS, [1])
        MITLS_ENABLED=1
        USE_MITLS="yes"
-       curl_ssl_msg="enabled (miTLS)"
+       ssl_msg="miTLS"
        ],
        [
          CPPFLAGS=$_cppflags
@@ -2211,6 +2214,8 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
     fi
 
   fi dnl miTLS not disabled
+
+  test -z "$ssl_msg" || ssl_backends="${ssl_backends:+$ssl_backends, }$ssl_msg"
 
 fi
 
