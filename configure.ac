@@ -2170,13 +2170,16 @@ if test -z "$ssl_backends" -o "x$OPT_MITLS" != xno; then
     if test "x$USE_MITLS" != "xyes"; then
       dnl add the path and test again
       addld=-L$OPT_MITLS/src/tls/extract/Kremlin-Library/$libsuff
-      addcflags=-I$OPT_MITLS/libs/ffi
+      addcflags="-I$OPT_MITLS/libs/ffi -I$OPT_MITLS/src/pki"
       mitlslib=$OPT_MITLS/src/tls/extract/Kremlin-Library/$libsuff
 
-      LDFLAGS="$LDFLAGS  -L$OPT_MITLS/../MLCrypto/openssl -lcrypto $addld"
+      LDFLAGS="$LDFLAGS -L$OPT_MITLS/../MLCrypto/openssl -L$OPT_MITLS/src/pki $addld"
       if test "$addcflags" != "-I/usr/include"; then
          CPPFLAGS="$CPPFLAGS $addcflags"
       fi
+
+      OLD_LIBS=$LIBS
+      LIBS="-lmitls -lcrypto -lmipki $LIBS"
 
       AC_CHECK_LIB(mitls, FFI_mitls_init,
        [
@@ -2190,12 +2193,14 @@ if test -z "$ssl_backends" -o "x$OPT_MITLS" != xno; then
          CPPFLAGS=$_cppflags
          LDFLAGS=$_ldflags
        ])
+
+       LIBS=$OLD_LIBS
     fi
 
     if test "x$USE_MITLS" = "xyes"; then
       AC_MSG_NOTICE([detected miTLS])
 
-      LIBS="-lmitls $LIBS"
+      LIBS="-lmitls -lcrypto -lmipki $LIBS"
 
       if test -n "$mitlslib"; then
         dnl when shared libs were found in a path that the run-time
@@ -2203,11 +2208,11 @@ if test -z "$ssl_backends" -o "x$OPT_MITLS" != xno; then
         dnl LD_LIBRARY_PATH to prevent further configure tests to fail
         dnl due to this
         if test "x$cross_compiling" != "xyes"; then
-          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl"
-          DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl"
+          LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl:$OPT_MITLS/src/pki"
+          DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$mitlslib:$OPT_MITLS/../MLCrypto/openssl:$OPT_MITLS/src/pki"
           export LD_LIBRARY_PATH
           export DYLD_LIBRARY_PATH
-	  LDFLAGS="-Wl,-rpath=$mitlslib -Wl,-rpath=$OPT_MITLS/../MLCrypto/openssl $LDFLAGS"
+	  LDFLAGS="-Wl,-rpath=$mitlslib -Wl,-rpath=$OPT_MITLS/../MLCrypto/openssl -Wl,-rpath=$OPT_MITLS/src/pki $LDFLAGS"
           AC_MSG_NOTICE([Added $mitlslib to LD_LIBRARY_PATH and DYLD_LIBRARY_PATH])
         fi
       fi

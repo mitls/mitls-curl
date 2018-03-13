@@ -48,6 +48,7 @@
 
 /* Functions exported from libmitls.dll */
 #include <mitlsffi.h>
+#include <mipki.h>
 
 /* ssl_connect_state usage
    This enum is initialized to 0/ssl_connect_1 ahead of calling
@@ -66,19 +67,13 @@
                                 has finished successfully
 */
 
-/* From miTLS TLSInfo.fst: */
-#define max_TLSPlaintext_fragment_length    16384
-#define max_TLSCompressed_fragment_length   \
-  ((max_TLSPlaintext_fragment_length) + 1024)
-#define max_TLSCiphertext_fragment_length   \
-  ((max_TLSPlaintext_fragment_length) + 2048)
-
 const char *mitls_TLS_V12 = "1.2";
 const char *mitls_TLS_V13 = "1.3";
 
 struct ssl_backend_data {
-  mitls_state * mitls_config;
+  mitls_state *mitls_config;
   struct connectdata *conn;
+  mipki_state *pki;
   int sockindex;
 };
 
@@ -141,8 +136,8 @@ int  Curl_mitls_init(void)
 void Curl_mitls_cleanup(void)
 {
   FFI_mitls_cleanup();
+  pthread_key_delete(mitls_tracekey);
 }
-
 
 /* Called by CURL */
 ssize_t Curl_mitls_send(struct connectdata *conn,
@@ -203,6 +198,54 @@ retry:
   return packet_size;
 }
 
+void* Curl_mitls_certificate_select(void *cbs, const unsigned char *sni, size_t sni_len, const mitls_signature_scheme *sigalgs, size_t sigalgs_len, mitls_signature_scheme *selected)
+{
+  struct ssl_backend_data *backend = (struct ssl_backend_data*)cbs;
+  mipki_chain r = mipki_select_certificate(backend->pki, (char*)sni, sni_len, sigalgs, sigalgs_len, selected);
+  return (void*)r;
+}
+
+size_t Curl_mitls_certificate_format(void *cbs, const void *cert_ptr, unsigned char *buffer)
+{
+  struct ssl_backend_data *backend = (struct ssl_backend_data*)cbs;
+  mipki_chain chain = (mipki_chain)cert_ptr;
+  return mipki_format_chain(backend->pki, chain, (char*)buffer, MAX_CHAIN_LEN);
+}
+
+size_t Curl_mitls_certificate_sign(void *cbs, const void *cert_ptr, const mitls_signature_scheme sigalg, const unsigned char *tbs, size_t tbs_len, unsigned char *sig)
+{
+  struct ssl_backend_data *backend = (struct ssl_backend_data*)cbs;
+  size_t ret = MAX_SIGNATURE_LEN;
+
+  if(mipki_sign_verify(backend->pki, cert_ptr, sigalg, (char*)tbs, tbs_len, (char*)sig, &ret, MIPKI_SIGN))
+    return ret;
+
+  return 0;
+}
+
+int Curl_mitls_certificate_verify(void *cbs, const unsigned char* chain_bytes, size_t chain_len, const mitls_signature_scheme sigalg, const unsigned char *tbs, size_t tbs_len, const unsigned char *sig, size_t sig_len)
+{
+  struct ssl_backend_data *backend = (struct ssl_backend_data*)cbs;
+  mipki_chain chain = mipki_parse_chain(backend->pki, (char*)chain_bytes, chain_len);
+
+  if(chain == NULL)
+  {
+    infof(backend->conn->data, "ERROR: failed to parse certificate chain");
+    return 0;
+  }
+
+  // We don't validate hostname, but could with the callback state
+  if(!mipki_validate_chain(backend->pki, chain, backend->conn->host.name))
+  {
+    infof(backend->conn->data, "WARNING: chain validation failed, ignoring.");
+    // return 0;
+  }
+
+  size_t slen = sig_len;
+  int r = mipki_sign_verify(backend->pki, chain, sigalg, (char*)tbs, tbs_len, (char*)sig, &slen, MIPKI_VERIFY);
+  mipki_free_chain(backend->pki, chain);
+  return r;
+}
 
 /* Initializes and configures miTLS */
 CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
@@ -214,6 +257,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   CURLcode ret = CURLE_SSL_CONNECT_ERROR;
   const char *tls_version = NULL;
   char *ciphers;
+  int erridx;
 
   const long int ssl_version = SSL_CONN_CONFIG(version);
 #ifdef USE_TLS_SRP
@@ -282,24 +326,42 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     failf(data, "FFI_mitls_configure failed\n");
     return ret;
   }
+
+  mipki_config_entry pki_config = {
+    .cert_file = ssl_cert,
+    .key_file = ssl_key,
+    .is_universal = 1 /* ignore SNI */
+  };
+  BACKEND->pki = mipki_init(&pki_config, (pki_config.cert_file) ? 1 : 0, NULL, &erridx);
+  if(!BACKEND->pki) {
+    failf(data, "mipki_init failed.  erridx=%d", erridx);
+    return ret;
+  }
   if(ssl_cafile) {
-    /* bugbug: handle a cafile */
-    infof(data, "WARNING: SSL: ssl_cafile is temporarily not supported.\n");
+    if(!mipki_add_root_file_or_path(BACKEND->pki, ssl_cafile)) {
+      failf(data, "mipki_add_root_file_or_path(%s) failed", ssl_cafile);
+      mipki_free(BACKEND->pki);
+      BACKEND->pki = NULL;
+      return ret;
+    }
   }
-  if(ssl_cert) {
-    /* bugbug: handle a cert chain file */
-    infof(data, "WARNING: SSL: ssl_cert is temporarily not supported.\n");
-  }
-  if(ssl_key) {
-    /* bugbug: handle a private key file */
-    infof(data, "WARNING: SSL: ssl_key is temporarily not supported.\n");
-  }
+
+  mitls_cert_cb cert_callbacks = {
+    .select = Curl_mitls_certificate_select,
+    .format = Curl_mitls_certificate_format,
+    .sign   = Curl_mitls_certificate_sign,
+    .verify = Curl_mitls_certificate_verify
+  };
+  result = FFI_mitls_configure_cert_callbacks(BACKEND->mitls_config, BACKEND, &cert_callbacks);
+
   ciphers = SSL_CONN_CONFIG(cipher_list);
   if(ciphers) {
     result = FFI_mitls_configure_cipher_suites(BACKEND->mitls_config,
                                                ciphers);
     if(result == 0) {
       failf(data, "FFI_mitls_configure_cipher_suites failed\n");
+      mipki_free(BACKEND->pki);
+      BACKEND->pki= NULL;
       return ret;
     }
   }
@@ -330,6 +392,8 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     result = FFI_mitls_configure_alpn(BACKEND->mitls_config, alpn_buffer);
     if(result == 0) {
       failf(data, "FFI_mitls_configure_alpn failed\n");
+      mipki_free(BACKEND->pki);
+      BACKEND->pki = NULL;
       return ret;
     }
   }
@@ -572,6 +636,9 @@ void Curl_mitls_close(struct connectdata *conn, int sockindex)
 
   FFI_mitls_close(BACKEND->mitls_config);
   BACKEND->mitls_config = NULL;
+
+  mipki_free(BACKEND->pki);
+  BACKEND->pki = NULL;
 
   pthread_setspecific(mitls_tracekey, NULL);
 }
