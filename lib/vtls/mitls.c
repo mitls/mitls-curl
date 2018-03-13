@@ -76,12 +76,13 @@
 const char *mitls_TLS_V12 = "1.2";
 const char *mitls_TLS_V13 = "1.3";
 
-/* This is miTLS-specific state, stored inside the ssl_connect_data */
-typedef struct {
+struct ssl_backend_data {
   mitls_state * mitls_config;
   struct connectdata *conn;
   int sockindex;
-} mitls_context;
+};
+
+#define BACKEND connssl->backend
 
 void MITLS_CALLCONV Curl_mitls_trace_callback(const char *msg);
 
@@ -152,12 +153,11 @@ ssize_t Curl_mitls_send(struct connectdata *conn,
 {
   struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
-  mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
   int result;
 
   pthread_setspecific(mitls_tracekey, data);
 
-  result = FFI_mitls_send(connmitls->mitls_config, mem, len);
+  result = FFI_mitls_send(BACKEND->mitls_config, mem, len);
   if(result == 0) {
     failf(data, "Failed FFI_mitls_prepare_send\n");
     *curlcode = CURLE_SEND_ERROR;
@@ -176,14 +176,13 @@ ssize_t Curl_mitls_recv(struct connectdata *conn,
 {
   struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
-  mitls_context *connmitls = (mitls_context*)connssl->mitls_ctx;
   size_t packet_size = 0;
   void *packet;
 
   pthread_setspecific(mitls_tracekey, data);
 
 retry:
-  packet = FFI_mitls_receive(connmitls->mitls_config,
+  packet = FFI_mitls_receive(BACKEND->mitls_config,
                              &packet_size);
   if(packet == NULL) {
     *curlcode = CURLE_RECV_ERROR;
@@ -199,7 +198,7 @@ retry:
     packet_size = buffersize;
   }
   memcpy(buf, packet, packet_size);
-  FFI_mitls_free_packet(connmitls->mitls_config, packet);
+  FFI_mitls_free_packet(BACKEND->mitls_config, packet);
   *curlcode = CURLE_OK;
   return packet_size;
 }
@@ -210,7 +209,6 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 {
   struct Curl_easy *data = conn->data;
   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
-  mitls_context *connmitls = NULL;
   void *ssl_sessionid;
   int result;
   CURLcode ret = CURLE_SSL_CONNECT_ERROR;
@@ -230,16 +228,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   const char * const ssl_key = SSL_SET_OPTION(key);
   const char * const ssl_key_type = SSL_SET_OPTION(key_type);
 
-  if(connssl->mitls_ctx) {
-    free(connssl->mitls_ctx);
-    connssl->mitls_ctx = NULL;
-  }
-  connmitls = (mitls_context*)malloc(sizeof(mitls_context));
-  if(!connmitls) {
-    return CURLE_OUT_OF_MEMORY;
-  }
-  memset(connmitls, 0, sizeof(*connmitls));
-  connssl->mitls_ctx = connmitls;
+  memset(BACKEND, 0, sizeof(struct ssl_backend_data));
   switch(ssl_version) {
   case CURL_SSLVERSION_DEFAULT:
   case CURL_SSLVERSION_TLSv1_2:
@@ -286,7 +275,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
 
   /* Create a miTLS-side config object representing the TLS connection
      settings */
-  result = FFI_mitls_configure(&connmitls->mitls_config,
+  result = FFI_mitls_configure(&BACKEND->mitls_config,
                                tls_version,
                                conn->host.name);
   if(result == 0) {
@@ -307,7 +296,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
   }
   ciphers = SSL_CONN_CONFIG(cipher_list);
   if(ciphers) {
-    result = FFI_mitls_configure_cipher_suites(connmitls->mitls_config,
+    result = FFI_mitls_configure_cipher_suites(BACKEND->mitls_config,
                                                ciphers);
     if(result == 0) {
       failf(data, "FFI_mitls_configure_cipher_suites failed\n");
@@ -338,7 +327,7 @@ CURLcode Curl_mitls_connect_step_1(struct connectdata *conn, int sockindex)
     infof(data, "ALPN, offering %s\n", ALPN_HTTP_1_1);
 
     *list_len = curlx_uitous(cur);
-    result = FFI_mitls_configure_alpn(connmitls->mitls_config, alpn_buffer);
+    result = FFI_mitls_configure_alpn(BACKEND->mitls_config, alpn_buffer);
     if(result == 0) {
       failf(data, "FFI_mitls_configure_alpn failed\n");
       return ret;
@@ -355,7 +344,7 @@ int MITLS_CALLCONV Curl_mitls_send_callback(
   const unsigned char *buffer,
   size_t buffer_size)
 {
-  mitls_context *connmitls = (mitls_context*)ctx;
+  struct ssl_backend_data *connmitls = (struct ssl_backend_data*)ctx;
   struct Curl_easy *data = connmitls->conn->data;
   ssize_t Remaining = (ssize_t)buffer_size;
   ssize_t SendResult;
@@ -399,7 +388,7 @@ int MITLS_CALLCONV Curl_mitls_recv_callback(
   unsigned char *buffer,
   size_t buffer_size)
 {
-  mitls_context *connmitls = (mitls_context*)ctx;
+  struct ssl_backend_data *connmitls = (struct ssl_backend_data*)ctx;
   struct Curl_easy *data = connmitls->conn->data;
   ssize_t RecvResult;
   ssize_t Remaining = buffer_size;
@@ -444,23 +433,22 @@ CURLcode Curl_mitls_connect_step_2(struct connectdata *conn,
                                    int sockindex)
 {
   struct Curl_easy *data = conn->data;
-  mitls_context *connmitls = (mitls_context*)conn->ssl[sockindex].mitls_ctx;
+  struct ssl_connect_data *connssl = &conn->ssl[sockindex];
   int ret;
   CURLcode result = CURLE_FAILED_INIT;
 
-  connmitls->conn = conn;
-  connmitls->sockindex = sockindex;
+  BACKEND->conn = conn;
+  BACKEND->sockindex = sockindex;
 
-  ret = FFI_mitls_connect(connmitls,
+  ret = FFI_mitls_connect(BACKEND,
                           Curl_mitls_send_callback,
                           Curl_mitls_recv_callback,
-                          connmitls->mitls_config);
+                          BACKEND->mitls_config);
   if(ret == 0) {
     failf(data, "FFI_mitls_connect failed");
     result = CURLE_FAILED_INIT;
   }
   else {
-    struct ssl_connect_data *connssl = &conn->ssl[sockindex];
     infof(data, "FFI_mitls_connect succeeded.  Connection complete.");
     connssl->connecting_state = ssl_connect_done;
 
@@ -582,15 +570,9 @@ void Curl_mitls_close(struct connectdata *conn, int sockindex)
 
   pthread_setspecific(mitls_tracekey, data);
 
-  if(connssl->mitls_ctx) {
-    mitls_context *connmitls =
-           (mitls_context*)connssl->mitls_ctx;
+  FFI_mitls_close(BACKEND->mitls_config);
+  BACKEND->mitls_config = NULL;
 
-    FFI_mitls_close(connmitls->mitls_config);
-    connmitls->mitls_config = NULL;
-    free(connssl->mitls_ctx);
-    connssl->mitls_ctx = NULL;
-  }
   pthread_setspecific(mitls_tracekey, NULL);
 }
 
@@ -624,5 +606,53 @@ void Curl_mitls_sha256sum(const unsigned char *tmp, /* input */
   (void)sha256sum;
   (void)unused;
 }
+
+static bool Curl_mitls_data_pending(const struct connectdata *conn,
+                                       int sockindex)
+{
+  const struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+  return false; /* bugbug: implement */
+}
+
+static void *Curl_mitls_get_internals(struct ssl_connect_data *connssl,
+                                         CURLINFO info UNUSED_PARAM)
+{
+  (void)info;
+  return &BACKEND->mitls_config;
+}
+
+const struct Curl_ssl Curl_ssl_mitls = {
+
+  { CURLSSLBACKEND_MITLS, "miTLS" }, /* info */
+  1, /* have_ca_path */
+  0, /* have_certinfo */
+  1, /* have_pinnedpubkey */
+  0, /* have_ssl_ctx */
+  0, /* support_https_proxy */
+
+  sizeof(struct ssl_backend_data),
+
+  Curl_mitls_init,                /* init */
+  Curl_mitls_cleanup,             /* cleanup */
+  Curl_mitls_version,             /* version */
+  Curl_none_check_cxn,            /* check_cxn */
+  Curl_none_shutdown,             /* shutdown */
+  Curl_mitls_data_pending,        /* data_pending */
+
+  Curl_none_random,               /* random */
+  Curl_none_cert_status_request,  /* cert_status_request */
+  Curl_mitls_connect,             /* connect */
+  Curl_mitls_connect_nonblocking, /* connect_nonblocking */
+  Curl_mitls_get_internals,       /* get_internals */
+  Curl_mitls_close,               /* close_one */
+  Curl_none_close_all,            /* close_all */
+  Curl_mitls_session_free,        /* session_free */
+  Curl_none_set_engine,           /* set_engine */
+  Curl_none_set_engine_default,   /* set_engine_default */
+  Curl_none_engines_list,         /* engines_list */
+  Curl_none_false_start,          /* false_start */
+  Curl_none_md5sum,               /* md5sum */
+  Curl_mitls_sha256sum            /* sha256sum */
+};
 
 #endif /* USE_MITLS */
