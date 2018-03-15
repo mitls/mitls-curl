@@ -39,6 +39,7 @@
 #include "vtls.h"
 #include "parsedate.h"
 #include "connect.h" /* for the connect timeout */
+#include "strerror.h"
 #include "select.h"
 #include "warnless.h"
 #include "curl_printf.h"
@@ -198,7 +199,7 @@ retry:
   return packet_size;
 }
 
-void* Curl_mitls_certificate_select(void *cbs, const unsigned char *sni, size_t sni_len, const mitls_signature_scheme *sigalgs, size_t sigalgs_len, mitls_signature_scheme *selected)
+void* Curl_mitls_certificate_select(void *cbs, mitls_version ver, const unsigned char *sni, size_t sni_len, const unsigned char *alpn, size_t alpn_len, const mitls_signature_scheme *sigalgs, size_t sigalgs_len, mitls_signature_scheme *selected)
 {
   struct ssl_backend_data *backend = (struct ssl_backend_data*)cbs;
   mipki_chain r = mipki_select_certificate(backend->pki, (char*)sni, sni_len, sigalgs, sigalgs_len, selected);
@@ -430,10 +431,8 @@ int MITLS_CALLCONV Curl_mitls_send_callback(
         Curl_wait_ms(1);
       }
       else {
-        char msg[128];
-        strerror_r(e, msg, sizeof(msg));
         infof(data, "Curl_mitls_send_callback():  Unknown errno %d - %s\n",
-                    e, msg);
+                    e, Curl_strerror(connmitls->conn, e));
         return -1;
       }
     }
@@ -476,10 +475,8 @@ int MITLS_CALLCONV Curl_mitls_recv_callback(
         Curl_wait_ms(1);
       }
       else {
-        char msg[128];
-        strerror_r(e, msg, sizeof(msg));
         infof(data, "Curl_mitls_recv_callback():  Unknown errno %d - %s\n",
-          e, msg);
+          e, Curl_strerror(connmitls->conn, e));
         return -1;
       }
     }
