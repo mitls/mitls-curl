@@ -194,7 +194,7 @@ retry:
     packet_size = buffersize;
   }
   memcpy(buf, packet, packet_size);
-  FFI_mitls_free_packet(BACKEND->mitls_config, packet);
+  FFI_mitls_free(BACKEND->mitls_config, packet);
   *curlcode = CURLE_OK;
   return packet_size;
 }
