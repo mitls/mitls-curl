@@ -5,7 +5,7 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 2004 - 2016, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 2004 - 2017, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
@@ -48,6 +48,10 @@
 #include "curl_printf.h"
 #include "curl_memory.h"
 #include "memdebug.h"
+
+#if defined(WIN32) || defined(_WIN32_WCE)
+#define PRESERVE_WINDOWS_ERROR_CODE
+#endif
 
 const char *
 curl_easy_strerror(CURLcode error)
@@ -187,9 +191,6 @@ curl_easy_strerror(CURLcode error)
   case CURLE_TELNET_OPTION_SYNTAX :
     return "Malformed telnet option";
 
-  case CURLE_PEER_FAILED_VERIFICATION:
-    return "SSL peer certificate or SSH remote key was not OK";
-
   case CURLE_GOT_NOTHING:
     return "Server returned nothing (no headers, no data)";
 
@@ -214,9 +215,8 @@ curl_easy_strerror(CURLcode error)
   case CURLE_SSL_CIPHER:
     return "Couldn't use specified SSL cipher";
 
-  case CURLE_SSL_CACERT:
-    return "Peer certificate cannot be authenticated with given CA "
-      "certificates";
+  case CURLE_PEER_FAILED_VERIFICATION:
+    return "SSL peer certificate or SSH remote key was not OK";
 
   case CURLE_SSL_CACERT_BADFILE:
     return "Problem with the SSL CA cert (path? access rights?)";
@@ -308,6 +308,9 @@ curl_easy_strerror(CURLcode error)
   case CURLE_HTTP2_STREAM:
     return "Stream error in the HTTP/2 framing layer";
 
+  case CURLE_RECURSIVE_API_CALL:
+    return "API function called from within callback";
+
     /* error codes not used by current libcurl */
   case CURLE_OBSOLETE20:
   case CURLE_OBSOLETE24:
@@ -317,6 +320,7 @@ curl_easy_strerror(CURLcode error)
   case CURLE_OBSOLETE44:
   case CURLE_OBSOLETE46:
   case CURLE_OBSOLETE50:
+  case CURLE_OBSOLETE51:
   case CURLE_OBSOLETE57:
   case CURL_LAST:
     break;
@@ -376,6 +380,9 @@ curl_multi_strerror(CURLMcode error)
   case CURLM_ADDED_ALREADY:
     return "The easy handle is already added to a multi handle";
 
+  case CURLM_RECURSIVE_API_CALL:
+    return "API function called from within callback";
+
   case CURLM_LAST:
     break;
   }
@@ -432,6 +439,10 @@ curl_share_strerror(CURLSHcode error)
 static const char *
 get_winsock_error (int err, char *buf, size_t len)
 {
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  DWORD old_win_err = GetLastError();
+#endif
+  int old_errno = errno;
   const char *p;
 
 #ifndef CURL_DISABLE_VERBOSE_STRINGS
@@ -611,6 +622,15 @@ get_winsock_error (int err, char *buf, size_t len)
 #endif
   strncpy(buf, p, len);
   buf [len-1] = '\0';
+
+  if(errno != old_errno)
+    errno = old_errno;
+
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  if(old_win_err != GetLastError())
+    SetLastError(old_win_err);
+#endif
+
   return buf;
 }
 #endif   /* USE_WINSOCK */
@@ -628,9 +648,12 @@ get_winsock_error (int err, char *buf, size_t len)
  */
 const char *Curl_strerror(struct connectdata *conn, int err)
 {
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  DWORD old_win_err = GetLastError();
+#endif
+  int old_errno = errno;
   char *buf, *p;
   size_t max;
-  int old_errno = ERRNO;
 
   DEBUGASSERT(conn);
   DEBUGASSERT(err >= 0);
@@ -722,8 +745,13 @@ const char *Curl_strerror(struct connectdata *conn, int err)
   if(p && (p - buf) >= 1)
     *p = '\0';
 
-  if(old_errno != ERRNO)
-    SET_ERRNO(old_errno);
+  if(errno != old_errno)
+    errno = old_errno;
+
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  if(old_win_err != GetLastError())
+    SetLastError(old_win_err);
+#endif
 
   return buf;
 }
@@ -731,16 +759,19 @@ const char *Curl_strerror(struct connectdata *conn, int err)
 #ifdef USE_WINDOWS_SSPI
 const char *Curl_sspi_strerror (struct connectdata *conn, int err)
 {
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  DWORD old_win_err = GetLastError();
+#endif
+  int old_errno = errno;
+  const char *txt;
+  char *outbuf;
+  size_t outmax;
 #ifndef CURL_DISABLE_VERBOSE_STRINGS
   char txtbuf[80];
   char msgbuf[sizeof(conn->syserr_buf)];
   char *p, *str, *msg = NULL;
   bool msg_formatted = FALSE;
-  int old_errno;
 #endif
-  const char *txt;
-  char *outbuf;
-  size_t outmax;
 
   DEBUGASSERT(conn);
 
@@ -749,8 +780,6 @@ const char *Curl_sspi_strerror (struct connectdata *conn, int err)
   *outbuf = '\0';
 
 #ifndef CURL_DISABLE_VERBOSE_STRINGS
-
-  old_errno = ERRNO;
 
   switch(err) {
     case SEC_E_OK:
@@ -1051,9 +1080,6 @@ const char *Curl_sspi_strerror (struct connectdata *conn, int err)
       strncpy(outbuf, str, outmax);
   }
 
-  if(old_errno != ERRNO)
-    SET_ERRNO(old_errno);
-
 #else
 
   if(err == SEC_E_OK)
@@ -1066,6 +1092,14 @@ const char *Curl_sspi_strerror (struct connectdata *conn, int err)
 #endif
 
   outbuf[outmax] = '\0';
+
+  if(errno != old_errno)
+    errno = old_errno;
+
+#ifdef PRESERVE_WINDOWS_ERROR_CODE
+  if(old_win_err != GetLastError())
+    SetLastError(old_win_err);
+#endif
 
   return outbuf;
 }

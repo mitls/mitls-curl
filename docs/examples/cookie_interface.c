@@ -5,7 +5,7 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 1998 - 2017, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 1998 - 2018, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
@@ -47,7 +47,8 @@ print_cookies(CURL *curl)
             curl_easy_strerror(res));
     exit(1);
   }
-  nc = cookies, i = 1;
+  nc = cookies;
+  i = 1;
   while(nc) {
     printf("[%d]: %s\n", i, nc->data);
     nc = nc->next;
@@ -70,7 +71,7 @@ main(void)
   if(curl) {
     char nline[256];
 
-    curl_easy_setopt(curl, CURLOPT_URL, "http://www.example.com/");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://www.example.com/");
     curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, ""); /* start cookie engine */
     res = curl_easy_perform(curl);

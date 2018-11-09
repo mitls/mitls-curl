@@ -26,6 +26,7 @@
 
 #ifdef USE_MITLS
 
+extern const struct Curl_ssl Curl_ssl_mitls;
 
 /* Called on first use miTLS, setup threading if supported */
 int  Curl_mitls_init(void);
